@@ -23,6 +23,7 @@ pub mod attribute_api;
 pub mod dataset;
 pub mod datatype_api;
 pub mod group;
+pub mod reference;
 
 // Filters
 pub mod filters;
@@ -30,8 +31,9 @@ pub mod filters;
 // Utilities
 pub mod cache;
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use memmap2::Mmap;
 
@@ -39,6 +41,7 @@ use cache::ChunkCache;
 use error::{Error, Result};
 use group::Group;
 use io::Cursor;
+use object_header::ObjectHeader;
 use superblock::Superblock;
 
 // Re-exports
@@ -68,6 +71,9 @@ impl Default for OpenOptions {
     }
 }
 
+/// Cache for parsed object headers, keyed by file address.
+pub type HeaderCache = Arc<Mutex<HashMap<u64, Arc<ObjectHeader>>>>;
+
 /// An opened HDF5 file.
 ///
 /// This is the main entry point for reading HDF5 files. The file data is
@@ -79,6 +85,8 @@ pub struct Hdf5File {
     superblock: Superblock,
     /// Shared chunk cache.
     chunk_cache: Arc<ChunkCache>,
+    /// Object header cache — avoids re-parsing the same header.
+    header_cache: HeaderCache,
 }
 
 enum FileData {
@@ -121,6 +129,7 @@ impl Hdf5File {
             data: FileData::Mmap(mmap),
             superblock,
             chunk_cache: cache,
+            header_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -128,20 +137,48 @@ impl Hdf5File {
     ///
     /// The data is copied into an owned buffer.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        let owned = data.to_vec();
-        let mut cursor = Cursor::new(&owned);
+        Self::from_vec(data.to_vec())
+    }
+
+    /// Open an HDF5 file from an owned byte vector without copying.
+    pub fn from_vec(data: Vec<u8>) -> Result<Self> {
+        let mut cursor = Cursor::new(&data);
         let superblock = Superblock::parse(&mut cursor)?;
 
         Ok(Hdf5File {
-            data: FileData::Bytes(owned),
+            data: FileData::Bytes(data),
             superblock,
             chunk_cache: Arc::new(ChunkCache::default()),
+            header_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
     /// Get the parsed superblock.
     pub fn superblock(&self) -> &Superblock {
         &self.superblock
+    }
+
+    /// Look up or parse an object header at the given address.
+    ///
+    /// Uses the internal cache to avoid re-parsing the same header.
+    pub fn get_or_parse_header(&self, addr: u64) -> Result<Arc<ObjectHeader>> {
+        {
+            let cache = self.header_cache.lock().unwrap();
+            if let Some(hdr) = cache.get(&addr) {
+                return Ok(Arc::clone(hdr));
+            }
+        }
+        let data = self.data.as_slice();
+        let hdr = ObjectHeader::parse_at(
+            data,
+            addr,
+            self.superblock.offset_size,
+            self.superblock.length_size,
+        )?;
+        let arc = Arc::new(hdr);
+        let mut cache = self.header_cache.lock().unwrap();
+        cache.insert(addr, Arc::clone(&arc));
+        Ok(arc)
     }
 
     /// Get the root group of the file.
@@ -156,6 +193,7 @@ impl Hdf5File {
             self.superblock.offset_size,
             self.superblock.length_size,
             self.chunk_cache.clone(),
+            self.header_cache.clone(),
         ))
     }
 
