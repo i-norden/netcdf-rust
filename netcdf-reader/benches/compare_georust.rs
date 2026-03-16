@@ -1,6 +1,6 @@
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
@@ -71,13 +71,25 @@ const SLICE_NC4_BASIC: SliceSpec = SliceSpec {
     start: &[1, 2],
     count: &[3, 4],
 };
+const HOT_SLICE_NC4_BASIC: SliceSpec = SliceSpec {
+    start: &[1, 2],
+    count: &[1, 1],
+};
 const SLICE_NC4_COMPRESSED: SliceSpec = SliceSpec {
     start: &[12, 18],
     count: &[28, 35],
 };
+const HOT_SLICE_NC4_COMPRESSED: SliceSpec = SliceSpec {
+    start: &[12, 18],
+    count: &[4, 4],
+};
 const SLICE_LARGE_NC4_COMPRESSED: SliceSpec = SliceSpec {
     start: &[256, 192],
     count: &[384, 320],
+};
+const HOT_SLICE_LARGE_NC4_COMPRESSED: SliceSpec = SliceSpec {
+    start: &[256, 192],
+    count: &[4, 4],
 };
 
 const CASES: &[BenchCase] = &[
@@ -314,6 +326,15 @@ fn slice_bytes(case: &BenchCase) -> Option<usize> {
     })
 }
 
+fn hot_slice_for_case(case: &BenchCase) -> Option<SliceSpec> {
+    match case.id {
+        "nc4_basic" => Some(HOT_SLICE_NC4_BASIC),
+        "nc4_compressed" => Some(HOT_SLICE_NC4_COMPRESSED),
+        "large_nc4_compressed" => Some(HOT_SLICE_LARGE_NC4_COMPRESSED),
+        _ => None,
+    }
+}
+
 fn thread_counts() -> Vec<usize> {
     if let Ok(raw) = std::env::var("BENCH_THREAD_LIST") {
         let mut values: Vec<_> = raw
@@ -340,6 +361,14 @@ fn thread_counts() -> Vec<usize> {
     values.sort_unstable();
     values.dedup();
     values
+}
+
+fn hot_ops_per_thread() -> usize {
+    std::env::var("BENCH_HOT_OPS_PER_THREAD")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(256)
 }
 
 fn checksum_f32(array: &ArrayD<f32>) -> u64 {
@@ -630,6 +659,137 @@ fn parallel_read_shared_cairn(file: &NcFile, case: &BenchCase, threads: usize) -
     })
 }
 
+fn metadata_batch_cairn_file(file: &NcFile, iterations: usize) -> usize {
+    let mut total = 0usize;
+    for _ in 0..iterations {
+        total ^= metadata_cairn_file(file);
+    }
+    total
+}
+
+fn metadata_batch_georust_file(file: &netcdf::File, iterations: usize) -> usize {
+    let mut total = 0usize;
+    for _ in 0..iterations {
+        total ^= metadata_georust_file(file);
+    }
+    total
+}
+
+fn parallel_metadata_batch_cairn(path: &Path, threads: usize, iterations: usize) -> usize {
+    let barrier = Arc::new(Barrier::new(threads));
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let barrier = barrier.clone();
+            handles.push(scope.spawn(move || {
+                let file = NcFile::open(path).unwrap();
+                barrier.wait();
+                metadata_batch_cairn_file(&file, iterations)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .fold(0usize, |acc, value| acc ^ value)
+    })
+}
+
+fn parallel_metadata_batch_georust(path: &Path, threads: usize, iterations: usize) -> usize {
+    let barrier = Arc::new(Barrier::new(threads));
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let barrier = barrier.clone();
+            handles.push(scope.spawn(move || {
+                let file = netcdf::open(path).unwrap();
+                barrier.wait();
+                metadata_batch_georust_file(&file, iterations)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .fold(0usize, |acc, value| acc ^ value)
+    })
+}
+
+fn slice_batch_cairn_dataset(
+    dataset: &hdf5_reader::Dataset<'_>,
+    case: &BenchCase,
+    slice: SliceSpec,
+    iterations: usize,
+) -> u64 {
+    let mut total = 0u64;
+    for _ in 0..iterations {
+        total ^= slice_checksum_cairn_dataset(dataset, case, slice);
+    }
+    total
+}
+
+fn slice_batch_georust_file(
+    file: &netcdf::File,
+    case: &BenchCase,
+    slice: SliceSpec,
+    iterations: usize,
+) -> u64 {
+    let mut total = 0u64;
+    for _ in 0..iterations {
+        total ^= slice_checksum_georust_file(file, case, slice);
+    }
+    total
+}
+
+fn parallel_slice_batch_cairn(
+    path: &Path,
+    case: &BenchCase,
+    slice: SliceSpec,
+    threads: usize,
+    iterations: usize,
+) -> u64 {
+    let barrier = Arc::new(Barrier::new(threads));
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let barrier = barrier.clone();
+            handles.push(scope.spawn(move || {
+                let file = Hdf5File::open(path).unwrap();
+                let dataset = file.dataset(&variable_hdf5_path(case.variable)).unwrap();
+                barrier.wait();
+                slice_batch_cairn_dataset(&dataset, case, slice, iterations)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .fold(0u64, |acc, value| acc ^ value)
+    })
+}
+
+fn parallel_slice_batch_georust(
+    path: &Path,
+    case: &BenchCase,
+    slice: SliceSpec,
+    threads: usize,
+    iterations: usize,
+) -> u64 {
+    let barrier = Arc::new(Barrier::new(threads));
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let barrier = barrier.clone();
+            handles.push(scope.spawn(move || {
+                let file = netcdf::open(path).unwrap();
+                barrier.wait();
+                slice_batch_georust_file(&file, case, slice, iterations)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .fold(0u64, |acc, value| acc ^ value)
+    })
+}
+
 fn validate_cases() {
     VALIDATION_ONCE.get_or_init(|| {
         for case in CASES {
@@ -838,6 +998,76 @@ fn bench_parallel_read_shared_cairn(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_parallel_metadata_batch(c: &mut Criterion) {
+    validate_cases();
+    let mut group = c.benchmark_group("parallel_metadata_batch");
+    let iterations = hot_ops_per_thread();
+
+    for threads in thread_counts().into_iter().filter(|threads| *threads > 0) {
+        for case in CASES
+            .iter()
+            .filter(|case| matches!(case.id, "nc4_basic" | "nc4_groups" | "nested_nc4_groups"))
+        {
+            let path = case_path(case);
+            group.throughput(Throughput::Elements((iterations * threads) as u64));
+
+            group.bench_with_input(
+                BenchmarkId::new(format!("cairn_x{threads}"), case.id),
+                &(path.clone(), threads),
+                |b, input| {
+                    b.iter(|| black_box(parallel_metadata_batch_cairn(&input.0, input.1, iterations)));
+                },
+            );
+
+            group.bench_with_input(
+                BenchmarkId::new(format!("georust_x{threads}"), case.id),
+                &(path.clone(), threads),
+                |b, input| {
+                    b.iter(|| black_box(parallel_metadata_batch_georust(&input.0, input.1, iterations)));
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_parallel_slice_batch(c: &mut Criterion) {
+    validate_cases();
+    let mut group = c.benchmark_group("parallel_slice_batch");
+    let iterations = hot_ops_per_thread();
+
+    for threads in thread_counts().into_iter().filter(|threads| *threads > 0) {
+        for case in CASES.iter().filter(|case| matches!(case.id, "nc4_basic" | "nc4_compressed" | "large_nc4_compressed")) {
+            let path = case_path(case);
+            let slice = hot_slice_for_case(case).unwrap();
+            group.throughput(Throughput::Elements((iterations * threads) as u64));
+
+            group.bench_with_input(
+                BenchmarkId::new(format!("cairn_x{threads}"), case.id),
+                &(path.clone(), threads),
+                |b, input| {
+                    b.iter(|| {
+                        black_box(parallel_slice_batch_cairn(&input.0, case, slice, input.1, iterations))
+                    });
+                },
+            );
+
+            group.bench_with_input(
+                BenchmarkId::new(format!("georust_x{threads}"), case.id),
+                &(path.clone(), threads),
+                |b, input| {
+                    b.iter(|| {
+                        black_box(parallel_slice_batch_georust(&input.0, case, slice, input.1, iterations))
+                    });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
 fn bench_read_full_internal_parallel(c: &mut Criterion) {
     validate_cases();
     let mut group = c.benchmark_group("read_full_internal_parallel");
@@ -917,6 +1147,8 @@ criterion_group!(
     bench_open_and_read_full,
     bench_slice_reuse_handle,
     bench_parallel_open_and_read,
-    bench_parallel_read_shared_cairn
+    bench_parallel_read_shared_cairn,
+    bench_parallel_metadata_batch,
+    bench_parallel_slice_batch
 );
 criterion_main!(benches);

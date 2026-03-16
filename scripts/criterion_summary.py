@@ -50,12 +50,14 @@ def iter_results(root: Path):
         median_ns = float(estimates["median"]["point_estimate"])
         throughput = benchmark.get("throughput") or {}
         bytes_count = throughput.get("Bytes")
+        elements_count = throughput.get("Elements")
         yield {
             "group": benchmark["group_id"],
             "implementation": benchmark.get("function_id") or "",
             "case": benchmark.get("value_str") or "",
             "median_ns": median_ns,
             "bytes": int(bytes_count) if bytes_count is not None else None,
+            "elements": int(elements_count) if elements_count is not None else None,
         }
 
 
@@ -77,6 +79,18 @@ def format_bytes_per_second(bytes_per_second: float) -> str:
         if value < 1024.0:
             break
         value /= 1024.0
+        unit = candidate
+    return f"{value:.2f} {unit}"
+
+
+def format_elements_per_second(elements_per_second: float) -> str:
+    units = ["ops/s", "Kops/s", "Mops/s", "Gops/s", "Tops/s"]
+    value = elements_per_second
+    unit = units[0]
+    for candidate in units[1:]:
+        if value < 1000.0:
+            break
+        value /= 1000.0
         unit = candidate
     return f"{value:.2f} {unit}"
 
@@ -105,7 +119,14 @@ def render_markdown(rows, include_speedup: bool):
 
 
 def render_csv(rows, include_speedup: bool):
-    columns = ["group", "implementation", "case", "median_ns", "throughput_bytes_per_second"]
+    columns = [
+        "group",
+        "implementation",
+        "case",
+        "median_ns",
+        "throughput_value_per_second",
+        "throughput_kind",
+    ]
     if include_speedup:
         columns.append("speedup_vs_x1")
     print(",".join(columns))
@@ -115,7 +136,8 @@ def render_csv(rows, include_speedup: bool):
             row["implementation"],
             row["case"],
             f"{row['median_ns']:.1f}",
-            "" if row["throughput_bps"] is None else f"{row['throughput_bps']:.3f}",
+            "" if row["throughput_value"] is None else f"{row['throughput_value']:.3f}",
+            row["throughput_kind"] or "",
         ]
         if include_speedup:
             values.append("" if row["speedup"] is None else f"{row['speedup']:.3f}")
@@ -144,8 +166,12 @@ def annotate_speedups(rows):
         if baseline is None:
             continue
 
-        if row["throughput_bps"] is not None and baseline["throughput_bps"] is not None:
-            speedup = row["throughput_bps"] / baseline["throughput_bps"]
+        if (
+            row["throughput_value"] is not None
+            and baseline["throughput_value"] is not None
+            and row["throughput_kind"] == baseline["throughput_kind"]
+        ):
+            speedup = row["throughput_value"] / baseline["throughput_value"]
         else:
             speedup = baseline["median_ns"] / row["median_ns"]
 
@@ -165,13 +191,20 @@ def main() -> int:
         if args.group and result["group"] not in args.group:
             continue
 
-        throughput_bps = None
+        throughput_value = None
+        throughput_kind = None
         throughput_display = "-"
         if result["bytes"] is not None and result["median_ns"] > 0.0:
-            throughput_bps = result["bytes"] / (result["median_ns"] / 1_000_000_000.0)
-            throughput_display = format_bytes_per_second(throughput_bps)
+            throughput_value = result["bytes"] / (result["median_ns"] / 1_000_000_000.0)
+            throughput_kind = "bytes"
+            throughput_display = format_bytes_per_second(throughput_value)
+        elif result["elements"] is not None and result["median_ns"] > 0.0:
+            throughput_value = result["elements"] / (result["median_ns"] / 1_000_000_000.0)
+            throughput_kind = "elements"
+            throughput_display = format_elements_per_second(throughput_value)
 
-        result["throughput_bps"] = throughput_bps
+        result["throughput_value"] = throughput_value
+        result["throughput_kind"] = throughput_kind
         result["throughput_display"] = throughput_display
         rows.append(result)
 
