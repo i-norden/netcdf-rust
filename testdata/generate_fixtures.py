@@ -320,7 +320,6 @@ def generate_netcdf4_fixtures(base_dir):
     path = os.path.join(nc4_dir, "nc4_basic.nc")
     print(f"  Generating {path}")
     ds = netCDF4.Dataset(path, "w", format="NETCDF4")
-    ds.format = "NetCDF-4"
     ds.createDimension("x", 5)
     ds.createDimension("y", 10)
     data = ds.createVariable("data", "f8", ("x", "y"))
@@ -391,7 +390,6 @@ def generate_netcdf4_fixtures(base_dir):
     path = os.path.join(nc4_dir, "nc4_classic_model.nc")
     print(f"  Generating {path}")
     ds = netCDF4.Dataset(path, "w", format="NETCDF4_CLASSIC")
-    ds.format = "NetCDF-4"
     ds.createDimension("x", 5)
     ds.createDimension("y", 10)
     data = ds.createVariable("data", "f8", ("x", "y"))
