@@ -735,6 +735,17 @@ impl<'f> Dataset<'f> {
             self.dataspace.dims.iter().map(|&d| d as usize).collect()
         };
 
+        if let Some(elements) = T::decode_vec(raw, &self.datatype, n) {
+            let elements = elements?;
+            if shape.is_empty() {
+                return Ok(ArrayD::from_shape_vec(IxDyn(&[]), elements)
+                    .map_err(|e| Error::InvalidData(format!("array shape error: {e}")))?);
+            }
+
+            return Ok(ArrayD::from_shape_vec(IxDyn(&shape), elements)
+                .map_err(|e| Error::InvalidData(format!("array shape error: {e}")))?);
+        }
+
         let mut elements = Vec::with_capacity(n);
         for i in 0..n {
             let start = i * elem_size;
@@ -828,6 +839,12 @@ fn copy_chunk_to_flat(
 ) {
     let ndim = dataset_shape.len();
 
+    if ndim == 0 {
+        let bytes = elem_size.min(chunk_data.len()).min(flat.len());
+        flat[..bytes].copy_from_slice(&chunk_data[..bytes]);
+        return;
+    }
+
     // Compute strides for the dataset (row-major)
     let mut dataset_strides = vec![1usize; ndim];
     for i in (0..ndim - 1).rev() {
@@ -847,41 +864,52 @@ fn copy_chunk_to_flat(
         actual_chunk_shape.push(remaining.min(chunk_shape[i]) as usize);
     }
 
-    let total_chunk_elements: usize = actual_chunk_shape.iter().product();
+    let row_elems = *actual_chunk_shape.last().unwrap_or(&1);
+    let row_bytes = row_elems * elem_size;
+    let dataset_origin: usize = chunk_offsets
+        .iter()
+        .enumerate()
+        .map(|(d, offset)| *offset as usize * dataset_strides[d])
+        .sum();
 
-    // Iterate over all elements in the chunk
-    let mut chunk_idx = vec![0usize; ndim];
-    for _ in 0..total_chunk_elements {
-        // Compute flat offset in chunk data
-        let mut chunk_flat = 0;
-        for d in 0..ndim {
-            chunk_flat += chunk_idx[d] * chunk_strides[d];
+    if ndim == 1 {
+        let bytes = row_bytes.min(chunk_data.len());
+        let dst_start = dataset_origin * elem_size;
+        let dst_end = dst_start + bytes;
+        if dst_end <= flat.len() {
+            flat[dst_start..dst_end].copy_from_slice(&chunk_data[..bytes]);
+        }
+        return;
+    }
+
+    let outer_dims = &actual_chunk_shape[..ndim - 1];
+    let total_rows: usize = outer_dims.iter().product();
+    let mut outer_idx = vec![0usize; ndim - 1];
+
+    for _ in 0..total_rows {
+        let mut chunk_row = 0usize;
+        let mut dataset_row = dataset_origin;
+        for d in 0..ndim - 1 {
+            chunk_row += outer_idx[d] * chunk_strides[d];
+            dataset_row += outer_idx[d] * dataset_strides[d];
         }
 
-        // Compute flat offset in dataset
-        let mut dataset_flat = 0;
-        for d in 0..ndim {
-            dataset_flat += (chunk_offsets[d] as usize + chunk_idx[d]) * dataset_strides[d];
-        }
-
-        let src_start = chunk_flat * elem_size;
-        let dst_start = dataset_flat * elem_size;
-        let src_end = src_start + elem_size;
-        let dst_end = dst_start + elem_size;
-
+        let src_start = chunk_row * elem_size;
+        let dst_start = dataset_row * elem_size;
+        let src_end = src_start + row_bytes;
+        let dst_end = dst_start + row_bytes;
         if src_end <= chunk_data.len() && dst_end <= flat.len() {
             flat[dst_start..dst_end].copy_from_slice(&chunk_data[src_start..src_end]);
         }
 
-        // Increment chunk index (row-major order)
         let mut carry = true;
-        for d in (0..ndim).rev() {
+        for d in (0..outer_idx.len()).rev() {
             if carry {
-                chunk_idx[d] += 1;
-                if chunk_idx[d] < actual_chunk_shape[d] {
+                outer_idx[d] += 1;
+                if outer_idx[d] < outer_dims[d] {
                     carry = false;
                 } else {
-                    chunk_idx[d] = 0;
+                    outer_idx[d] = 0;
                 }
             }
         }
@@ -1054,5 +1082,33 @@ mod tests {
             1,
         );
         assert_eq!(flat, vec![0, 0, 1, 2, 3, 4, 0, 0]);
+    }
+
+    #[test]
+    fn test_copy_chunk_2d_rowwise() {
+        let chunk_data = vec![1u8, 2, 3, 4, 5, 6];
+        let mut flat = vec![0u8; 16];
+        let chunk_offsets = vec![1u64, 1u64];
+        let chunk_shape = vec![2u64, 3u64];
+        let dataset_shape = vec![4u64, 4u64];
+
+        copy_chunk_to_flat(
+            &chunk_data,
+            &mut flat,
+            &chunk_offsets,
+            &chunk_shape,
+            &dataset_shape,
+            1,
+        );
+
+        assert_eq!(
+            flat,
+            vec![
+                0, 0, 0, 0,
+                0, 1, 2, 3,
+                0, 4, 5, 6,
+                0, 0, 0, 0,
+            ]
+        );
     }
 }
