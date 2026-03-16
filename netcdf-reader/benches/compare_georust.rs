@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use std::thread;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use hdf5_reader::{Hdf5File, SliceInfo, SliceInfoElem};
+use hdf5_reader::{Hdf5File, OpenOptions, SliceInfo, SliceInfoElem};
 use ndarray::ArrayD;
 use rayon::ThreadPoolBuilder;
 use tempfile::TempDir;
@@ -871,12 +871,49 @@ fn bench_read_full_internal_parallel(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_read_full_internal_parallel_nocache(c: &mut Criterion) {
+    validate_cases();
+    let mut group = c.benchmark_group("read_full_internal_parallel_nocache");
+
+    for case in CASES
+        .iter()
+        .filter(|case| matches!(case.id, "nc4_compressed" | "large_nc4_compressed"))
+    {
+        let path = case_path(case);
+        let cairn_file = Hdf5File::open_with_options(
+            &path,
+            OpenOptions {
+                chunk_cache_bytes: 0,
+                chunk_cache_slots: 1,
+                filter_registry: None,
+            },
+        )
+        .unwrap();
+        let dataset = cairn_file.dataset(&variable_hdf5_path(case.variable)).unwrap();
+        group.throughput(Throughput::Bytes(case_bytes(case) as u64));
+
+        group.bench_function(BenchmarkId::new("cairn_x1", case.id), |b| {
+            b.iter(|| black_box(full_read_checksum_cairn_dataset(&dataset, case)));
+        });
+
+        for threads in thread_counts().into_iter().filter(|threads| *threads > 1) {
+            let pool = ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            group.bench_function(BenchmarkId::new(format!("cairn_x{threads}"), case.id), |b| {
+                b.iter(|| black_box(full_read_checksum_cairn_dataset_in_pool(&dataset, case, &pool)));
+            });
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_open_only,
     bench_metadata_reuse_handle,
     bench_read_full_reuse_handle,
     bench_read_full_internal_parallel,
+    bench_read_full_internal_parallel_nocache,
     bench_open_and_read_full,
     bench_slice_reuse_handle,
     bench_parallel_open_and_read,

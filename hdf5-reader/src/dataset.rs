@@ -21,9 +21,38 @@ use crate::messages::HdfMessage;
 use crate::object_header::ObjectHeader;
 
 #[cfg(feature = "rayon")]
-struct DecodedChunk {
-    offsets: Vec<u64>,
-    data: Arc<Vec<u8>>,
+#[derive(Clone, Copy)]
+struct FlatBufferPtr {
+    ptr: *mut u8,
+    len: usize,
+}
+
+#[cfg(feature = "rayon")]
+unsafe impl Send for FlatBufferPtr {}
+
+#[cfg(feature = "rayon")]
+unsafe impl Sync for FlatBufferPtr {}
+
+#[cfg(feature = "rayon")]
+impl FlatBufferPtr {
+    unsafe fn copy_chunk(
+        self,
+        chunk_data: &[u8],
+        chunk_offsets: &[u64],
+        chunk_shape: &[u64],
+        dataset_shape: &[u64],
+        elem_size: usize,
+    ) {
+        copy_chunk_to_flat_ptr(
+            chunk_data,
+            self.ptr,
+            self.len,
+            chunk_offsets,
+            chunk_shape,
+            dataset_shape,
+            elem_size,
+        );
+    }
 }
 
 /// Hyperslab selection for reading slices of datasets.
@@ -401,27 +430,28 @@ impl<'f> Dataset<'f> {
             elem_size,
         )?;
 
-        let decoded_chunks: Vec<DecodedChunk> = entries
+        let flat = FlatBufferPtr {
+            ptr: flat_data.as_mut_ptr(),
+            len: flat_data.len(),
+        };
+
+        entries
             .par_iter()
             .map(|entry| {
                 self.load_chunk_data(entry, index_address, &chunk_shape, elem_size)
-                    .map(|data| DecodedChunk {
-                        offsets: entry.offsets.clone(),
-                        data,
+                    .map(|data| {
+                        unsafe {
+                            flat.copy_chunk(
+                                &data,
+                                &entry.offsets,
+                                &chunk_shape,
+                                shape,
+                                elem_size,
+                            );
+                        }
                     })
             })
             .collect::<std::result::Result<Vec<_>, Error>>()?;
-
-        for chunk in decoded_chunks {
-            copy_chunk_to_flat(
-                &chunk.data,
-                &mut flat_data,
-                &chunk.offsets,
-                &chunk_shape,
-                shape,
-                elem_size,
-            );
-        }
 
         self.decode_raw_data::<T>(&flat_data)
     }
@@ -901,6 +931,7 @@ impl<'f> Dataset<'f> {
             vec![0u8; total_bytes]
         }
     }
+
 }
 
 fn normalize_layout(layout: DataLayout, dataspace: &DataspaceMessage) -> DataLayout {
@@ -936,11 +967,33 @@ fn copy_chunk_to_flat(
     dataset_shape: &[u64],
     elem_size: usize,
 ) {
+    unsafe {
+        copy_chunk_to_flat_ptr(
+            chunk_data,
+            flat.as_mut_ptr(),
+            flat.len(),
+            chunk_offsets,
+            chunk_shape,
+            dataset_shape,
+            elem_size,
+        );
+    }
+}
+
+unsafe fn copy_chunk_to_flat_ptr(
+    chunk_data: &[u8],
+    flat_ptr: *mut u8,
+    flat_len: usize,
+    chunk_offsets: &[u64],
+    chunk_shape: &[u64],
+    dataset_shape: &[u64],
+    elem_size: usize,
+) {
     let ndim = dataset_shape.len();
 
     if ndim == 0 {
-        let bytes = elem_size.min(chunk_data.len()).min(flat.len());
-        flat[..bytes].copy_from_slice(&chunk_data[..bytes]);
+        let bytes = elem_size.min(chunk_data.len()).min(flat_len);
+        std::ptr::copy_nonoverlapping(chunk_data.as_ptr(), flat_ptr, bytes);
         return;
     }
 
@@ -975,8 +1028,8 @@ fn copy_chunk_to_flat(
         let bytes = row_bytes.min(chunk_data.len());
         let dst_start = dataset_origin * elem_size;
         let dst_end = dst_start + bytes;
-        if dst_end <= flat.len() {
-            flat[dst_start..dst_end].copy_from_slice(&chunk_data[..bytes]);
+        if dst_end <= flat_len {
+            std::ptr::copy_nonoverlapping(chunk_data.as_ptr(), flat_ptr.add(dst_start), bytes);
         }
         return;
     }
@@ -997,8 +1050,12 @@ fn copy_chunk_to_flat(
         let dst_start = dataset_row * elem_size;
         let src_end = src_start + row_bytes;
         let dst_end = dst_start + row_bytes;
-        if src_end <= chunk_data.len() && dst_end <= flat.len() {
-            flat[dst_start..dst_end].copy_from_slice(&chunk_data[src_start..src_end]);
+        if src_end <= chunk_data.len() && dst_end <= flat_len {
+            std::ptr::copy_nonoverlapping(
+                chunk_data.as_ptr().add(src_start),
+                flat_ptr.add(dst_start),
+                row_bytes,
+            );
         }
 
         let mut carry = true;
