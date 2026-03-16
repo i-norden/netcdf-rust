@@ -91,7 +91,7 @@ fn parse_data_block(
     address: u64,
     header: &FaHeader,
     offset_size: u8,
-    length_size: u8,
+    chunk_size_len: u8,
 ) -> Result<Vec<FaRawEntry>> {
     let mut cursor = Cursor::new(data);
     cursor.set_position(address);
@@ -127,7 +127,7 @@ fn parse_data_block(
             num_entries,
             is_filtered,
             offset_size,
-            length_size,
+            chunk_size_len,
         )?;
         // Skip the trailing checksum (already verified structurally).
         let _checksum = cursor.read_u32_le()?;
@@ -168,7 +168,7 @@ fn parse_data_block(
                     entries_in_this_page,
                     is_filtered,
                     offset_size,
-                    length_size,
+                    chunk_size_len,
                 )?;
                 // Each page has its own checksum.
                 let _page_checksum = cursor.read_u32_le()?;
@@ -195,13 +195,13 @@ fn read_entries(
     count: usize,
     is_filtered: bool,
     offset_size: u8,
-    length_size: u8,
+    chunk_size_len: u8,
 ) -> Result<Vec<FaRawEntry>> {
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
         let address = cursor.read_offset(offset_size)?;
         let (chunk_size, filter_mask) = if is_filtered {
-            let cs = cursor.read_length(length_size)?;
+            let cs = cursor.read_length(chunk_size_len)?;
             let fm = cursor.read_u32_le()?;
             (cs, fm)
         } else {
@@ -225,6 +225,7 @@ pub fn collect_fixed_array_chunk_entries(
     header_address: u64,
     offset_size: u8,
     length_size: u8,
+    chunk_size_len: u8,
     dataset_shape: &[u64],
     chunk_dims: &[u32],
 ) -> Result<Vec<ChunkEntry>> {
@@ -239,7 +240,7 @@ pub fn collect_fixed_array_chunk_entries(
         header.data_block_address,
         &header,
         offset_size,
-        length_size,
+        chunk_size_len,
     )?;
 
     let ndim = dataset_shape.len();

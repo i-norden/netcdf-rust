@@ -70,6 +70,9 @@ impl Attribute {
     /// and offset_size — this method will return an error directing you there.
     pub fn read_string(&self) -> Result<String> {
         match &self.datatype {
+            Datatype::VarLen { base } if is_byte_vlen(base) => {
+                decode_varlen_byte_string(&self.raw_data)
+            }
             Datatype::String {
                 size,
                 encoding,
@@ -328,6 +331,16 @@ fn decode_string(
         .map_err(|e| Error::InvalidData(format!("invalid string data: {e}")))
 }
 
+fn is_byte_vlen(base: &Datatype) -> bool {
+    matches!(base, Datatype::FixedPoint { size: 1, .. })
+}
+
+fn decode_varlen_byte_string(bytes: &[u8]) -> Result<String> {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8(bytes[..end].to_vec())
+        .map_err(|e| Error::InvalidData(format!("invalid string data: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +397,23 @@ mod tests {
             raw_data: b"meters\0\0\0\0".to_vec(),
         };
         assert_eq!(attr.read_string().unwrap(), "meters");
+    }
+
+    #[test]
+    fn test_varlen_byte_string_attribute() {
+        let attr = Attribute {
+            name: "name".to_string(),
+            datatype: Datatype::VarLen {
+                base: Box::new(Datatype::FixedPoint {
+                    size: 1,
+                    signed: false,
+                    byte_order: ByteOrder::LittleEndian,
+                }),
+            },
+            shape: vec![],
+            raw_data: b"test_dataset".to_vec(),
+        };
+        assert_eq!(attr.read_string().unwrap(), "test_dataset");
     }
 
     #[test]

@@ -134,13 +134,13 @@ fn read_entries(
     count: usize,
     is_filtered: bool,
     offset_size: u8,
-    length_size: u8,
+    chunk_size_len: u8,
 ) -> Result<Vec<EaRawEntry>> {
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
         let address = cursor.read_offset(offset_size)?;
         let (chunk_size, filter_mask) = if is_filtered {
-            let cs = cursor.read_length(length_size)?;
+            let cs = cursor.read_length(chunk_size_len)?;
             let fm = cursor.read_u32_le()?;
             (cs, fm)
         } else {
@@ -166,7 +166,7 @@ fn parse_data_block(
     is_filtered: bool,
     max_page_bits: u8,
     offset_size: u8,
-    length_size: u8,
+    chunk_size_len: u8,
     sizeof_nelmts: usize,
 ) -> Result<Vec<EaRawEntry>> {
     let mut cursor = Cursor::new(data);
@@ -230,7 +230,7 @@ fn parse_data_block(
                     entries_in_page,
                     is_filtered,
                     offset_size,
-                    length_size,
+                    chunk_size_len,
                 )?;
                 let _page_checksum = cursor.read_u32_le()?;
                 all_entries.extend(page_entries);
@@ -252,7 +252,7 @@ fn parse_data_block(
             num_entries,
             is_filtered,
             offset_size,
-            length_size,
+            chunk_size_len,
         )?;
         let _checksum = cursor.read_u32_le()?;
         Ok(entries)
@@ -265,6 +265,8 @@ fn parse_secondary_block(
     address: u64,
     num_dblk_addrs: usize,
     offset_size: u8,
+    sizeof_nelmts: usize,
+    page_bitmap_bytes: usize,
 ) -> Result<Vec<u64>> {
     let mut cursor = Cursor::new(data);
     cursor.set_position(address);
@@ -286,11 +288,11 @@ fn parse_secondary_block(
 
     let _client_id = cursor.read_u8()?;
     let _header_address = cursor.read_offset(offset_size)?;
-    let _block_offset = cursor.read_u64_le()?;
+    cursor.skip(sizeof_nelmts)?;
 
-    // Read page init bitmap if paging is used — we skip over it for now
-    // since we just need the data block addresses.
-    // (Pages within data blocks are handled by parse_data_block.)
+    if page_bitmap_bytes > 0 {
+        cursor.skip(page_bitmap_bytes)?;
+    }
 
     let mut addrs = Vec::with_capacity(num_dblk_addrs);
     for _ in 0..num_dblk_addrs {
@@ -312,6 +314,7 @@ pub fn collect_extensible_array_chunk_entries(
     header_address: u64,
     offset_size: u8,
     length_size: u8,
+    chunk_size_len: u8,
     dataset_shape: &[u64],
     chunk_dims: &[u32],
 ) -> Result<Vec<ChunkEntry>> {
@@ -354,7 +357,7 @@ pub fn collect_extensible_array_chunk_entries(
         num_inline,
         is_filtered,
         offset_size,
-        length_size,
+        chunk_size_len,
     )?;
 
     // 2. Data block addresses stored directly in the index block.
@@ -428,7 +431,7 @@ pub fn collect_extensible_array_chunk_entries(
                     is_filtered,
                     header.max_dblk_page_nelmts_bits,
                     offset_size,
-                    length_size,
+                    chunk_size_len,
                     sizeof_nelmts,
                 )?;
                 all_entries.extend(dblk_entries);
@@ -455,7 +458,23 @@ pub fn collect_extensible_array_chunk_entries(
             continue;
         }
 
-        let dblk_addrs = parse_secondary_block(data, sec_addr, num_dblks as usize, offset_size)?;
+        let page_bitmap_bytes = if header.max_dblk_page_nelmts_bits > 0
+            && elmts_per_dblk > (1u64 << header.max_dblk_page_nelmts_bits)
+        {
+            let page_nelmts = 1usize << header.max_dblk_page_nelmts_bits;
+            let pages_per_dblk = (elmts_per_dblk as usize).div_ceil(page_nelmts);
+            (num_dblks as usize * pages_per_dblk).div_ceil(8)
+        } else {
+            0
+        };
+        let dblk_addrs = parse_secondary_block(
+            data,
+            sec_addr,
+            num_dblks as usize,
+            offset_size,
+            sizeof_nelmts,
+            page_bitmap_bytes,
+        )?;
 
         for &dblk_addr in &dblk_addrs {
             if Cursor::is_undefined_offset(dblk_addr, offset_size) {
@@ -474,7 +493,7 @@ pub fn collect_extensible_array_chunk_entries(
                     is_filtered,
                     header.max_dblk_page_nelmts_bits,
                     offset_size,
-                    length_size,
+                    chunk_size_len,
                     sizeof_nelmts,
                 )?;
                 all_entries.extend(dblk_entries);

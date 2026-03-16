@@ -104,6 +104,7 @@ impl<'f> Dataset<'f> {
         let dt = datatype.ok_or_else(|| Error::InvalidData("dataset missing datatype".into()))?;
         let layout =
             layout.ok_or_else(|| Error::InvalidData("dataset missing data layout".into()))?;
+        let layout = normalize_layout(layout, &dataspace);
 
         Ok(Dataset {
             file_data,
@@ -357,22 +358,24 @@ impl<'f> Dataset<'f> {
                 chunk_dims,
                 elem_size,
             )),
-            Some(ChunkIndexing::FixedArray { .. }) => {
+            Some(ChunkIndexing::FixedArray { chunk_size_len, .. }) => {
                 crate::fixed_array::collect_fixed_array_chunk_entries(
                     self.file_data,
                     index_address,
                     self.offset_size,
                     self.length_size,
+                    *chunk_size_len,
                     shape,
                     chunk_dims,
                 )
             }
-            Some(ChunkIndexing::ExtensibleArray { .. }) => {
+            Some(ChunkIndexing::ExtensibleArray { chunk_size_len, .. }) => {
                 crate::extensible_array::collect_extensible_array_chunk_entries(
                     self.file_data,
                     index_address,
                     self.offset_size,
                     self.length_size,
+                    *chunk_size_len,
                     shape,
                     chunk_dims,
                 )
@@ -778,6 +781,30 @@ impl<'f> Dataset<'f> {
             Ok(ArrayD::from_shape_vec(IxDyn(&shape), elements)
                 .map_err(|e| Error::InvalidData(format!("array shape error: {e}")))?)
         }
+    }
+}
+
+fn normalize_layout(layout: DataLayout, dataspace: &DataspaceMessage) -> DataLayout {
+    match layout {
+        DataLayout::Chunked {
+            address,
+            mut dims,
+            mut element_size,
+            chunk_indexing,
+        } if dims.len() == dataspace.dims.len() + 1 => {
+            if let Some(legacy_element_size) = dims.pop() {
+                if element_size == 0 {
+                    element_size = legacy_element_size;
+                }
+            }
+            DataLayout::Chunked {
+                address,
+                dims,
+                element_size,
+                chunk_indexing,
+            }
+        }
+        other => other,
     }
 }
 
