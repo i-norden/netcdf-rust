@@ -92,6 +92,10 @@ impl ClassicFile {
                 expected: "numeric type".to_string(),
                 actual: "String".to_string(),
             }),
+            _ => Err(Error::TypeMismatch {
+                expected: "numeric type".to_string(),
+                actual: format!("{:?}", var.dtype),
+            }),
         }
     }
 

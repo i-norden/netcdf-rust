@@ -17,15 +17,17 @@
 //! | FloatingPoint { size=8 }      | Double   |
 //! | String (any)                  | String   |
 //! | Enum { base=byte }            | Byte*    |
+//! | Compound { .. }               | Compound |
+//! | Opaque { .. }                 | Opaque   |
+//! | Array { base, dims }          | Array    |
+//! | VarLen { base }               | VLen     |
 //!
 //! * Enums are mapped to their base integer type.
-//!
-//! TODO: Phase 5 — Full type mapping implementation.
 
 use hdf5_reader::messages::datatype::Datatype;
 
 use crate::error::{Error, Result};
-use crate::types::NcType;
+use crate::types::{NcCompoundField, NcType};
 
 /// Map an HDF5 datatype to a NetCDF type.
 pub fn hdf5_to_nc_type(dtype: &Datatype) -> Result<NcType> {
@@ -56,6 +58,37 @@ pub fn hdf5_to_nc_type(dtype: &Datatype) -> Result<NcType> {
         Datatype::Enum { base, .. } => {
             // Enums map to their base integer type.
             hdf5_to_nc_type(base)
+        }
+        Datatype::Compound { size, fields } => {
+            let mut nc_fields = Vec::with_capacity(fields.len());
+            for f in fields {
+                nc_fields.push(NcCompoundField {
+                    name: f.name.clone(),
+                    offset: f.byte_offset as u64,
+                    dtype: hdf5_to_nc_type(&f.datatype)?,
+                });
+            }
+            Ok(NcType::Compound {
+                size: *size,
+                fields: nc_fields,
+            })
+        }
+        Datatype::Opaque { size, tag } => Ok(NcType::Opaque {
+            size: *size,
+            tag: tag.clone(),
+        }),
+        Datatype::Array { base, dims } => {
+            let base_nc = hdf5_to_nc_type(base)?;
+            Ok(NcType::Array {
+                base: Box::new(base_nc),
+                dims: dims.clone(),
+            })
+        }
+        Datatype::VarLen { base } => {
+            let base_nc = hdf5_to_nc_type(base)?;
+            Ok(NcType::VLen {
+                base: Box::new(base_nc),
+            })
         }
         _ => Err(Error::InvalidData(format!(
             "HDF5 datatype {:?} has no NetCDF-4 equivalent",

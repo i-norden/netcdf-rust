@@ -6,8 +6,16 @@ pub struct NcDimension {
     pub is_unlimited: bool,
 }
 
+/// A field within a compound (struct) type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NcCompoundField {
+    pub name: String,
+    pub offset: u64,
+    pub dtype: NcType,
+}
+
 /// NetCDF data types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NcType {
     /// NC_BYTE (i8)
     Byte,
@@ -33,6 +41,20 @@ pub enum NcType {
     UInt64,
     /// NetCDF-4 only (variable-length string)
     String,
+    /// NetCDF-4 compound type (struct with named fields).
+    Compound {
+        size: u32,
+        fields: Vec<NcCompoundField>,
+    },
+    /// NetCDF-4 opaque type (uninterpreted byte blob).
+    Opaque { size: u32, tag: String },
+    /// NetCDF-4 array type (fixed-size array of a base type).
+    Array {
+        base: Box<NcType>,
+        dims: Vec<u64>,
+    },
+    /// NetCDF-4 variable-length type.
+    VLen { base: Box<NcType> },
 }
 
 impl NcType {
@@ -45,6 +67,12 @@ impl NcType {
             NcType::Int64 | NcType::UInt64 | NcType::Double => 8,
             // Variable-length string; no fixed element size, but pointer-sized in memory.
             NcType::String => std::mem::size_of::<usize>(),
+            NcType::Compound { size, .. } => *size as usize,
+            NcType::Opaque { size, .. } => *size as usize,
+            NcType::Array { base, dims } => {
+                base.size() * dims.iter().map(|&d| d as usize).product::<usize>()
+            }
+            NcType::VLen { .. } => std::mem::size_of::<usize>(), // pointer-sized
         }
     }
 
@@ -62,8 +90,32 @@ impl NcType {
             NcType::UInt => Some(9),
             NcType::Int64 => Some(10),
             NcType::UInt64 => Some(11),
-            NcType::String => None, // Not valid in classic format
+            // Extended types are not valid in classic format.
+            NcType::String
+            | NcType::Compound { .. }
+            | NcType::Opaque { .. }
+            | NcType::Array { .. }
+            | NcType::VLen { .. } => None,
         }
+    }
+
+    /// Returns true if this is a primitive numeric or string type.
+    pub fn is_primitive(&self) -> bool {
+        matches!(
+            self,
+            NcType::Byte
+                | NcType::Char
+                | NcType::Short
+                | NcType::Int
+                | NcType::Float
+                | NcType::Double
+                | NcType::UByte
+                | NcType::UShort
+                | NcType::UInt
+                | NcType::Int64
+                | NcType::UInt64
+                | NcType::String
+        )
     }
 }
 
@@ -166,8 +218,8 @@ impl NcVariable {
     }
 
     /// Variable data type.
-    pub fn dtype(&self) -> NcType {
-        self.dtype
+    pub fn dtype(&self) -> &NcType {
+        &self.dtype
     }
 
     /// Shape of the variable as a vector of dimension sizes.
@@ -344,11 +396,11 @@ mod tests {
         assert_eq!(root.variable("root_var").unwrap().name(), "root_var");
         assert_eq!(
             root.variable("obs/temperature").unwrap().dtype(),
-            NcType::Float
+            &NcType::Float
         );
         assert_eq!(
             root.variable("/obs/surface/pressure").unwrap().dtype(),
-            NcType::Double
+            &NcType::Double
         );
         assert!(root.variable("pressure").is_none());
     }
