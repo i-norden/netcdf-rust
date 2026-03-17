@@ -125,10 +125,7 @@ fn parse_epoch(s: &str) -> Result<NaiveDateTime> {
         return Ok(d.and_hms_opt(0, 0, 0).unwrap());
     }
 
-    Err(Error::InvalidData(format!(
-        "cannot parse CF epoch '{}'",
-        s
-    )))
+    Err(Error::InvalidData(format!("cannot parse CF epoch '{}'", s)))
 }
 
 /// Decode a numeric time value to a UTC DateTime.
@@ -166,10 +163,7 @@ pub fn decode_time(value: f64, time_ref: &CfTimeRef) -> Result<DateTime<Utc>> {
 }
 
 /// Decode a vector of numeric time values.
-pub fn decode_times(
-    values: &[f64],
-    time_ref: &CfTimeRef,
-) -> Result<Vec<DateTime<Utc>>> {
+pub fn decode_times(values: &[f64], time_ref: &CfTimeRef) -> Result<Vec<DateTime<Utc>>> {
     values.iter().map(|&v| decode_time(v, time_ref)).collect()
 }
 
@@ -192,8 +186,7 @@ mod tests {
 
     #[test]
     fn test_parse_hours_since_with_time() {
-        let tr =
-            parse_time_units("hours since 2000-01-01 00:00:00", CfCalendar::Standard).unwrap();
+        let tr = parse_time_units("hours since 2000-01-01 00:00:00", CfCalendar::Standard).unwrap();
         assert_eq!(tr.unit, CfTimeUnit::Hours);
         assert_eq!(
             tr.epoch,
@@ -213,8 +206,7 @@ mod tests {
 
     #[test]
     fn test_decode_hours() {
-        let tr =
-            parse_time_units("hours since 2000-01-01 00:00:00", CfCalendar::Standard).unwrap();
+        let tr = parse_time_units("hours since 2000-01-01 00:00:00", CfCalendar::Standard).unwrap();
         let dt = decode_time(24.0, &tr).unwrap();
         assert_eq!(dt.format("%Y-%m-%d").to_string(), "2000-01-02");
     }

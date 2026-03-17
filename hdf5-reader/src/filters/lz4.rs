@@ -20,8 +20,7 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
         ));
     }
 
-    let orig_size =
-        u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let orig_size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
     let mut output = Vec::with_capacity(orig_size);
     let mut pos = 4;
 

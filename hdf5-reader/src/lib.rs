@@ -220,17 +220,16 @@ impl Hdf5File {
             .collect();
 
         if parts.is_empty() {
-            return Err(Error::DatasetNotFound(path.to_string())
-                .with_context(path));
+            return Err(Error::DatasetNotFound(path.to_string()).with_context(path));
         }
 
         let mut group = self.root_group()?;
         for &part in &parts[..parts.len() - 1] {
-            group = group.group(part)
-                .map_err(|e| e.with_context(path))?;
+            group = group.group(part).map_err(|e| e.with_context(path))?;
         }
 
-        group.dataset(parts[parts.len() - 1])
+        group
+            .dataset(parts[parts.len() - 1])
             .map_err(|e| e.with_context(path))
     }
 

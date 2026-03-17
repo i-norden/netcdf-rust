@@ -21,9 +21,7 @@ impl MaskParams {
     ///
     /// Returns `None` if no masking attributes are present.
     pub fn from_variable(var: &NcVariable) -> Option<Self> {
-        let fill = var
-            .attribute("_FillValue")
-            .and_then(|a| a.value.as_f64());
+        let fill = var.attribute("_FillValue").and_then(|a| a.value.as_f64());
         let missing = var
             .attribute("missing_value")
             .and_then(|a| a.value.as_f64());

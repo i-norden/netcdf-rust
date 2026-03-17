@@ -49,10 +49,7 @@ pub enum NcType {
     /// NetCDF-4 opaque type (uninterpreted byte blob).
     Opaque { size: u32, tag: String },
     /// NetCDF-4 array type (fixed-size array of a base type).
-    Array {
-        base: Box<NcType>,
-        dims: Vec<u64>,
-    },
+    Array { base: Box<NcType>, dims: Vec<u64> },
     /// NetCDF-4 variable-length type.
     VLen { base: Box<NcType> },
 }

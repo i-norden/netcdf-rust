@@ -328,7 +328,11 @@ impl<'f> Group<'f> {
     }
 
     /// Resolve dense links from a fractal heap + B-tree v2.
-    fn resolve_dense_links(&self, link_info: &LinkInfoMessage, link_depth: u32) -> Result<Vec<ChildEntry>> {
+    fn resolve_dense_links(
+        &self,
+        link_info: &LinkInfoMessage,
+        link_depth: u32,
+    ) -> Result<Vec<ChildEntry>> {
         // Parse the fractal heap at the link_info address.
         let mut heap_cursor = Cursor::new(self.file_data);
         heap_cursor.set_position(link_info.fractal_heap_address);

@@ -392,9 +392,10 @@ fn read_attr_values(
         | NcType::Compound { .. }
         | NcType::Opaque { .. }
         | NcType::Array { .. }
-        | NcType::VLen { .. } => Err(Error::InvalidData(
-            format!("{:?} is not valid in classic format attributes", typ),
-        )),
+        | NcType::VLen { .. } => Err(Error::InvalidData(format!(
+            "{:?} is not valid in classic format attributes",
+            typ
+        ))),
     }
 }
 

@@ -51,10 +51,7 @@ impl FilterRegistry {
             Box::new(|data, _| fletcher32::verify_and_strip(data)),
         );
         #[cfg(feature = "lz4")]
-        registry.register(
-            FILTER_LZ4,
-            Box::new(|data, _| lz4::decompress(data)),
-        );
+        registry.register(FILTER_LZ4, Box::new(|data, _| lz4::decompress(data)));
         registry
     }
 

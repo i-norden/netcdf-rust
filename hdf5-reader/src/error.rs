@@ -143,10 +143,7 @@ pub enum Error {
     Other(String),
 
     #[error("{path}: {source}")]
-    Context {
-        path: String,
-        source: Box<Error>,
-    },
+    Context { path: String, source: Box<Error> },
 }
 
 impl Error {

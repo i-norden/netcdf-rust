@@ -22,12 +22,8 @@ impl UnpackParams {
     /// Returns `None` if neither `scale_factor` nor `add_offset` is present
     /// (i.e., no unpacking needed).
     pub fn from_variable(var: &NcVariable) -> Option<Self> {
-        let scale = var
-            .attribute("scale_factor")
-            .and_then(|a| a.value.as_f64());
-        let offset = var
-            .attribute("add_offset")
-            .and_then(|a| a.value.as_f64());
+        let scale = var.attribute("scale_factor").and_then(|a| a.value.as_f64());
+        let offset = var.attribute("add_offset").and_then(|a| a.value.as_f64());
 
         if scale.is_none() && offset.is_none() {
             return None;

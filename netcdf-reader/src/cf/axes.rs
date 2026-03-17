@@ -53,8 +53,11 @@ pub fn identify_axis(var: &NcVariable) -> CfAxisType {
                 "latitude" => return CfAxisType::Y,
                 "longitude" => return CfAxisType::X,
                 "time" => return CfAxisType::T,
-                "altitude" | "height" | "depth"
-                | "air_pressure" | "atmosphere_hybrid_sigma_pressure_coordinate"
+                "altitude"
+                | "height"
+                | "depth"
+                | "air_pressure"
+                | "atmosphere_hybrid_sigma_pressure_coordinate"
                 | "atmosphere_ln_pressure_coordinate"
                 | "atmosphere_sigma_coordinate"
                 | "ocean_sigma_coordinate"
@@ -74,7 +77,12 @@ pub fn identify_axis(var: &NcVariable) -> CfAxisType {
             // Latitude units
             if matches!(
                 lower.as_str(),
-                "degrees_north" | "degree_north" | "degree_n" | "degrees_n" | "degreen" | "degreesn"
+                "degrees_north"
+                    | "degree_north"
+                    | "degree_n"
+                    | "degrees_n"
+                    | "degreen"
+                    | "degreesn"
             ) {
                 return CfAxisType::Y;
             }
@@ -90,7 +98,10 @@ pub fn identify_axis(var: &NcVariable) -> CfAxisType {
                 return CfAxisType::T;
             }
             // Pressure units (common vertical)
-            if matches!(lower.as_str(), "pa" | "hpa" | "mbar" | "millibar" | "bar" | "atm") {
+            if matches!(
+                lower.as_str(),
+                "pa" | "hpa" | "mbar" | "millibar" | "bar" | "atm"
+            ) {
                 return CfAxisType::Z;
             }
         }
