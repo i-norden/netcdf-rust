@@ -92,21 +92,56 @@ pub fn apply_pipeline(
     element_size: usize,
     registry: Option<&FilterRegistry>,
 ) -> Result<Vec<u8>> {
-    let mut buf = data.to_vec();
+    // Count active filters to decide on single-buffer vs double-buffer strategy.
+    let active_count = filters
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(i, _)| filter_mask & (1 << i) == 0)
+        .count();
+
+    if active_count == 0 {
+        return Ok(data.to_vec());
+    }
+
+    // For a single active filter, avoid the double-buffer overhead.
+    if active_count == 1 {
+        for (i, filter) in filters.iter().enumerate().rev() {
+            if filter_mask & (1 << i) != 0 {
+                continue;
+            }
+            return if let Some(reg) = registry {
+                reg.apply(filter.id, data, element_size)
+            } else {
+                apply_builtin_filter(filter, data, element_size)
+            };
+        }
+    }
+
+    // Multi-filter pipeline: the first stage reads from the borrowed input
+    // slice (avoiding a copy), subsequent stages consume the previous output.
+    // Each filter stage necessarily allocates (output sizes are unpredictable),
+    // but we avoid the initial data.to_vec() copy.
+    let mut owned: Option<Vec<u8>> = None;
 
     for (i, filter) in filters.iter().enumerate().rev() {
         if filter_mask & (1 << i) != 0 {
             continue;
         }
 
-        buf = if let Some(reg) = registry {
-            reg.apply(filter.id, &buf, element_size)?
-        } else {
-            apply_builtin_filter(filter, &buf, element_size)?
+        let input: &[u8] = match &owned {
+            Some(buf) => buf,
+            None => data,
         };
+
+        owned = Some(if let Some(reg) = registry {
+            reg.apply(filter.id, input, element_size)?
+        } else {
+            apply_builtin_filter(filter, input, element_size)?
+        });
     }
 
-    Ok(buf)
+    Ok(owned.unwrap_or_else(|| data.to_vec()))
 }
 
 fn apply_builtin_filter(
