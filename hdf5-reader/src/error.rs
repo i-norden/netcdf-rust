@@ -141,6 +141,22 @@ pub enum Error {
 
     #[error("{0}")]
     Other(String),
+
+    #[error("{path}: {source}")]
+    Context {
+        path: String,
+        source: Box<Error>,
+    },
+}
+
+impl Error {
+    /// Wrap this error with an object path for additional context.
+    pub fn with_context(self, path: impl Into<String>) -> Self {
+        Error::Context {
+            path: path.into(),
+            source: Box::new(self),
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -204,6 +204,7 @@ impl Hdf5File {
             "/".to_string(),
             self.superblock.offset_size,
             self.superblock.length_size,
+            addr, // root_address = self
             self.chunk_cache.clone(),
             self.header_cache.clone(),
             self.filter_registry.clone(),
@@ -219,15 +220,18 @@ impl Hdf5File {
             .collect();
 
         if parts.is_empty() {
-            return Err(Error::DatasetNotFound(path.to_string()));
+            return Err(Error::DatasetNotFound(path.to_string())
+                .with_context(path));
         }
 
         let mut group = self.root_group()?;
         for &part in &parts[..parts.len() - 1] {
-            group = group.group(part)?;
+            group = group.group(part)
+                .map_err(|e| e.with_context(path))?;
         }
 
         group.dataset(parts[parts.len() - 1])
+            .map_err(|e| e.with_context(path))
     }
 
     /// Convenience: get a group at a path like "/group1/subgroup".

@@ -1,5 +1,7 @@
 pub mod deflate;
 pub mod fletcher32;
+#[cfg(feature = "lz4")]
+pub mod lz4;
 pub mod shuffle;
 
 use std::collections::HashMap;
@@ -14,6 +16,8 @@ pub const FILTER_FLETCHER32: u16 = 3;
 pub const FILTER_SZIP: u16 = 4;
 pub const FILTER_NBIT: u16 = 5;
 pub const FILTER_SCALEOFFSET: u16 = 6;
+/// HDF5 registered LZ4 filter.
+pub const FILTER_LZ4: u16 = 32004;
 
 /// A user-supplied filter function.
 ///
@@ -45,6 +49,11 @@ impl FilterRegistry {
         registry.register(
             FILTER_FLETCHER32,
             Box::new(|data, _| fletcher32::verify_and_strip(data)),
+        );
+        #[cfg(feature = "lz4")]
+        registry.register(
+            FILTER_LZ4,
+            Box::new(|data, _| lz4::decompress(data)),
         );
         registry
     }
@@ -115,6 +124,8 @@ fn apply_builtin_filter(
         FILTER_SZIP => Err(Error::UnsupportedFilter("szip".into())),
         FILTER_NBIT => Err(Error::UnsupportedFilter("nbit".into())),
         FILTER_SCALEOFFSET => Err(Error::UnsupportedFilter("scaleoffset".into())),
+        #[cfg(feature = "lz4")]
+        FILTER_LZ4 => lz4::decompress(data),
         id => Err(Error::UnsupportedFilter(format!("filter id {}", id))),
     }
 }
