@@ -65,6 +65,8 @@ jobs:
     name: Benchmark regression check
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/bench-regression
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,15 +89,75 @@ jobs:
         run: |
           git worktree add ../base origin/${{ github.base_ref }}
           cd ../base
-          cargo bench --bench compare_georust -- --save-baseline base 2>/dev/null || true
+          python testdata/generate_fixtures.py
+          cargo bench -p netcdf-reader --bench compare_georust -- --save-baseline base
 
       - name: Run PR benchmarks
-        run: cargo bench --bench compare_georust -- --save-baseline pr
+        run: cargo bench -p netcdf-reader --bench compare_georust -- --save-baseline pr
 
       - name: Compare (fail on >10% regression)
         run: |
-          critcmp base pr --threshold 10 || {
-            echo "::warning::Benchmark regression >10% detected"
-            critcmp base pr
-            exit 1
-          }
+          echo "Benchmark deltas >=10%:"
+          critcmp base pr --target-dir "$CARGO_TARGET_DIR" --threshold 10 || true
+
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          threshold = 1.10
+          target = Path(os.environ["CARGO_TARGET_DIR"]) / "criterion"
+          base_files = sorted(target.glob("**/base/estimates.json"))
+          if not base_files:
+              print(f"No base benchmark estimates found under {target}", file=sys.stderr)
+              sys.exit(1)
+
+          regressions = []
+          missing_pr = []
+
+          for base_file in base_files:
+              bench_dir = base_file.parent.parent
+              pr_file = bench_dir / "pr" / "estimates.json"
+              if not pr_file.exists():
+                  missing_pr.append(bench_dir.relative_to(target).as_posix())
+                  continue
+
+              with base_file.open() as fh:
+                  base_mean = json.load(fh)["mean"]["point_estimate"]
+              with pr_file.open() as fh:
+                  pr_mean = json.load(fh)["mean"]["point_estimate"]
+
+              if base_mean <= 0 or pr_mean <= 0:
+                  continue
+
+              ratio = pr_mean / base_mean
+              if ratio > threshold:
+                  regressions.append(
+                      (ratio, bench_dir.relative_to(target).as_posix(), base_mean, pr_mean)
+                  )
+
+          if missing_pr:
+              print("Missing PR benchmark estimates for:", file=sys.stderr)
+              for name in missing_pr:
+                  print(f"  {name}", file=sys.stderr)
+              sys.exit(1)
+
+          def fmt_ns(value: float) -> str:
+              for unit, scale in (("s", 1e9), ("ms", 1e6), ("us", 1e3)):
+                  if value >= scale:
+                      return f"{value / scale:.1f}{unit}"
+              return f"{value:.1f}ns"
+
+          if regressions:
+              print("Benchmark regressions >10% (PR mean / base mean):", file=sys.stderr)
+              for ratio, name, base_mean, pr_mean in sorted(regressions, reverse=True):
+                  print(
+                      f"  {name:70} {ratio:5.2f}x  "
+                      f"base={fmt_ns(base_mean):>8}  pr={fmt_ns(pr_mean):>8}",
+                      file=sys.stderr,
+                  )
+              sys.exit(1)
+
+          print("No benchmark regressions >10% detected.")
+          PY
