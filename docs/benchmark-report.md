@@ -261,6 +261,32 @@ The current results demonstrate that:
 - warm single-read scaling is now constrained more by this host than by obvious
   decoder serialization
 
+## Quick Reference
+
+Summary of the latest full benchmark run (Apple M1, macOS 13.0):
+
+| Benchmark | cairn | georust | Ratio |
+|---|---:|---:|---|
+| **open_only** | | | |
+| cdf1_simple | 23 µs | 61 µs | 2.6x faster |
+| nc4_basic | 44 µs | 259 µs | 5.9x faster |
+| nc4_compressed | 54 µs | 254 µs | 4.7x faster |
+| large_cdf5 | 36 µs | 1.09 ms | 30x faster |
+| large_nc4_compressed | 52 µs | 291 µs | 5.6x faster |
+| **metadata_reuse** | | | |
+| cdf1_simple | 6.5 ns | 781 ns | 120x faster |
+| nc4_basic | 6.1 ns | 2.59 µs | 424x faster |
+| large_nc4_compressed | 7.2 ns | 1.07 µs | 148x faster |
+| **read_full** | | | |
+| cdf1_simple | 223 ns (857 MiB/s) | 1.0 µs (190 MiB/s) | 4.5x faster |
+| nc4_basic | 2.1 µs (181 MiB/s) | 4.5 µs (86 MiB/s) | 2.1x faster |
+| nc4_compressed | 24.6 µs (1.51 GiB/s) | 25.3 µs (1.47 GiB/s) | ~parity |
+| large_nc4_compressed | 5.6 ms (1.40 GiB/s) | 4.1 ms (1.91 GiB/s) | 0.73x |
+| **parallel read** | | | |
+| cairn_x1 nc4_compressed | 22.4 µs (1.66 GiB/s) | 33.9 µs (1.10 GiB/s) | 1.5x faster |
+| cairn_x1 large_nc4 | 3.77 ms (2.07 GiB/s) | 4.14 ms (1.89 GiB/s) | 1.1x faster |
+| cairn_x4 large_nc4 | 3.69 ms (2.12 GiB/s) | — | internal parallelism |
+
 ## Limits
 
 - This report reflects one local system.

@@ -56,8 +56,9 @@ let slice: ndarray::ArrayD<f64> = ds.read_slice(&sel)?;
 - Compact, contiguous, and chunked data layouts
 - All chunk index types: V1/V2 B-tree, single-chunk, implicit, Fixed Array, Extensible Array
 - Layout v4 and v5 (HDF5 2.0)
-- Filter pipeline: deflate (zlib), shuffle, Fletcher-32
-- Pluggable `FilterRegistry` for custom filters (Blosc, LZ4, etc.)
+- Filter pipeline: deflate (zlib), shuffle, Fletcher-32, LZ4 (feature-gated)
+- Pluggable `FilterRegistry` for custom filters (Blosc, ZFP, etc.)
+- Soft link resolution with cycle detection
 - Fractal heap + B-tree v2 dense link resolution
 - Shared (committed) datatype resolution
 - Variable-length string reading via global heap
@@ -72,6 +73,10 @@ let slice: ndarray::ArrayD<f64> = ds.read_slice(&sel)?;
 - Automatic format detection from magic bytes
 - Dimension reconstruction via `DIMENSION_LIST` object references (with size-based fallback)
 - Unified `NcFile::read_variable::<T>()` across all formats
+- `scale_factor`/`add_offset` unpacking via `read_variable_unpacked()`
+- `_FillValue`/`missing_value` masking via `read_variable_masked()`
+- Combined mask-then-unpack via `read_variable_unpacked_masked()`
+- Compound, Opaque, Array, and VLen type mapping for NetCDF-4
 - Attribute filtering (hides internal `_NCProperties`, `DIMENSION_LIST`, etc.)
 - Record (unlimited) dimension support
 
@@ -86,7 +91,9 @@ netcdf-reader = { version = "0.1", default-features = false }  # CDF-1/2/5 only
 | Flag | Default | Description |
 |---|---|---|
 | `netcdf4` | yes | NetCDF-4 support via `hdf5-reader` |
-| `cf` | no | CF Conventions helpers (time decoding, CRS, axes) |
+| `rayon` | yes | Parallel chunk reading |
+| `cf` | no | CF Conventions helpers (axis identification, time decoding, CRS extraction, bounds) |
+| `lz4` | no | LZ4 filter support (hdf5-reader) |
 
 ## Custom filters
 
@@ -181,9 +188,10 @@ Notes:
 
 ## Known limitations
 
-- Soft and external HDF5 links are skipped
+- External HDF5 links are skipped (soft links are resolved)
 - SZIP, N-Bit, and ScaleOffset filters are not built in (register via `FilterRegistry`)
 - SOHM (shared object header message table) resolution is deferred
+- CF time decoding uses Gregorian approximation for non-standard calendars (noleap, 360_day)
 
 ## License
 
