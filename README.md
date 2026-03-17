@@ -206,7 +206,7 @@ Notes:
 - Larger benchmark-only fixtures are generated at runtime, so the suite covers
   both small checked-in files and more realistic compressed datasets.
 - Parallel cases include both independent `open + read` scaling against the
-  C-backed baseline and a `parallel_read_shared_cairn` case that measures our
+  C-backed baseline and a `parallel_read_shared_netcdf_rust` case that measures our
   shared-open-handle throughput directly.
 - `read_full_internal_parallel` measures one large chunked read with internal
   chunk-level Rayon parallelism, which is distinct from the independent-read

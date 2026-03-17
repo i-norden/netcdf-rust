@@ -238,7 +238,7 @@ def generate_hdf5_fixtures(base_dir):
 
     # ---- 21. climate_4d.h5 ----
     # Tests: 4D dataset (time x level x lat x lon) with coordinate variables,
-    # chunked + deflate. Critical for climate/cairn integration testing.
+    # chunked + deflate. Critical for climate/netcdf-rust integration testing.
     path = os.path.join(hdf5_dir, "climate_4d.h5")
     print(f"  Generating {path}")
     with h5py.File(path, "w") as f:
@@ -397,7 +397,7 @@ def generate_netcdf3_fixtures(base_dir):
     # ---- 7. climate_4d.nc ----
     # Tests: 4D dataset (time x level x lat x lon) in CDF-1 classic format
     # with coordinate variables. CDF-1 does not support chunking/compression,
-    # so data is contiguous. Critical for climate/cairn integration testing.
+    # so data is contiguous. Critical for climate/netcdf-rust integration testing.
     path = os.path.join(nc3_dir, "climate_4d.nc")
     print(f"  Generating {path}")
     ds = netCDF4.Dataset(path, "w", format="NETCDF3_CLASSIC")
@@ -619,7 +619,7 @@ def generate_netcdf4_fixtures(base_dir):
     # ---- 8. nc4_climate_4d.nc ----
     # Tests: 4D dataset (time x level x lat x lon) in NetCDF-4/HDF5 format
     # with coordinate variables, chunked + zlib compression.
-    # Critical for climate/cairn integration testing.
+    # Critical for climate/netcdf-rust integration testing.
     path = os.path.join(nc4_dir, "nc4_climate_4d.nc")
     print(f"  Generating {path}")
     ds = netCDF4.Dataset(path, "w", format="NETCDF4")

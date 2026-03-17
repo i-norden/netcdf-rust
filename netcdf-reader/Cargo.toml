@@ -26,6 +26,7 @@ default = ["netcdf4", "rayon"]
 netcdf4 = ["dep:hdf5-reader"]
 rayon = ["dep:rayon", "netcdf4", "hdf5-reader/rayon"]
 cf = ["dep:chrono"]
+bench-memory-profile = []
 
 [dependencies.chrono]
 version = "0.4"

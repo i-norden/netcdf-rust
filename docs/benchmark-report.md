@@ -34,7 +34,7 @@ The suite covers the main user-visible workloads for this repository:
 - `parallel_open_and_read`: independent concurrent reads
 - `parallel_metadata_batch`: repeated metadata walks with one open handle per worker
 - `parallel_slice_batch`: repeated tiny slice reads with one open handle per worker
-- `parallel_read_shared_cairn`: shared-handle throughput for `netcdf-rust`
+- `parallel_read_shared_netcdf_rust`: shared-handle throughput for `netcdf-rust`
 - `read_full_internal_parallel`: one large read using internal chunk-parallelism
 - `read_full_internal_parallel_nocache`: the same single-read path with the
   chunk cache disabled to expose cold decompression cost
@@ -62,7 +62,7 @@ cargo test
 
 BENCH_THREAD_LIST=1,2,4,8 BENCH_HOT_OPS_PER_THREAD=256 \
   cargo bench -p netcdf-reader --bench compare_georust \
-  'parallel_metadata_batch/.*/(nc4_basic|nested_nc4_groups)|parallel_slice_batch/.*/(nc4_basic|nc4_compressed|large_nc4_compressed)|read_full_internal_parallel(_nocache)?/.*/large_nc4_compressed|parallel_open_and_read/.*/large_nc4_compressed|parallel_read_shared_cairn/.*/large_nc4_compressed|open_only/.*/(cdf1_simple|nc4_basic|nc4_compressed|nc4_groups_nested)|metadata_reuse_handle/.*/(cdf1_simple|nc4_basic|nc4_compressed|nc4_groups_nested)|read_full_reuse_handle/.*/(cdf1_simple|nc4_basic|nc4_compressed|nc4_groups_nested)|open_and_read_full/.*/(cdf1_simple|nc4_basic|nc4_compressed|nc4_groups_nested)|slice_reuse_handle_hdf5_backend/.*/(nc4_compressed|large_nc4_compressed)' \
+  'parallel_metadata_batch/.*/(nc4_basic|nested_nc4_groups)|parallel_slice_batch/.*/(nc4_basic|nc4_compressed|large_nc4_compressed)|read_full_internal_parallel(_nocache)?/.*/large_nc4_compressed|parallel_open_and_read/.*/large_nc4_compressed|parallel_read_shared_netcdf_rust/.*/large_nc4_compressed|open_only/.*/(cdf1_simple|nc4_basic|nc4_compressed|nc4_groups_nested)|metadata_reuse_handle/.*/(cdf1_simple|nc4_basic|nc4_compressed|nc4_groups_nested)|read_full_reuse_handle/.*/(cdf1_simple|nc4_basic|nc4_compressed|nc4_groups_nested)|open_and_read_full/.*/(cdf1_simple|nc4_basic|nc4_compressed|nc4_groups_nested)|slice_reuse_handle_hdf5_backend/.*/(nc4_compressed|large_nc4_compressed)' \
   -- --noplot --sample-size 10 --measurement-time 0.1 --warm-up-time 0.1
 
 python3 scripts/criterion_summary.py --speedup \
@@ -74,7 +74,7 @@ python3 scripts/criterion_summary.py --speedup \
   --group parallel_metadata_batch \
   --group parallel_slice_batch \
   --group parallel_open_and_read \
-  --group parallel_read_shared_cairn \
+  --group parallel_read_shared_netcdf_rust \
   --group read_full_internal_parallel \
   --group read_full_internal_parallel_nocache
 ```
@@ -226,7 +226,7 @@ warm cached path.
 
 ### Large compressed NetCDF-4, shared-handle throughput
 
-`parallel_read_shared_cairn` keeps one open handle and issues concurrent reads:
+`parallel_read_shared_netcdf_rust` keeps one open handle and issues concurrent reads:
 
 | impl | median | throughput |
 | --- | ---: | ---: |
@@ -274,7 +274,7 @@ The current results demonstrate that:
 
 Summary of the latest full benchmark run (Apple M1, macOS 13.0):
 
-| Benchmark | cairn | georust | Ratio |
+| Benchmark | netcdf-rust | georust | Ratio |
 |---|---:|---:|---|
 | **read_full (reuse handle)** | | | |
 | cdf1_simple | 167 ns | 992 ns | 5.9x faster |
