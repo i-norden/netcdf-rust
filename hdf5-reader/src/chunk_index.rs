@@ -1,12 +1,12 @@
 //! Chunk indexing — resolves chunk locations from various storage strategies.
 //!
-//! Supports:
+//! Supports all six HDF5 chunk indexing types:
 //! - V1 B-tree chunk indexing (btree_v1 type 1) — dispatched externally
 //! - V2 B-tree chunk indexing (btree_v2 types 10 and 11)
 //! - Single chunk indexing
 //! - Implicit chunk indexing
-//!
-//! Fixed array and extensible array return errors (not yet implemented).
+//! - Fixed array indexing (fixed_array module)
+//! - Extensible array indexing (extensible_array module)
 
 use crate::error::Result;
 

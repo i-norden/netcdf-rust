@@ -20,7 +20,9 @@
 
 pub mod classic;
 pub mod error;
+pub mod masked;
 pub mod types;
+pub mod unpack;
 
 #[cfg(feature = "netcdf4")]
 pub mod nc4;
@@ -301,6 +303,49 @@ impl NcFile {
             NcFileInner::Nc4(_) => None,
         }
     }
+
+    /// Read a variable and apply `scale_factor`/`add_offset` unpacking.
+    ///
+    /// Returns `actual = stored * scale_factor + add_offset`.
+    /// If neither attribute is present, returns the raw data as f64.
+    pub fn read_variable_unpacked(&self, name: &str) -> Result<ArrayD<f64>> {
+        let var = self.variable(name)?;
+        let params = unpack::UnpackParams::from_variable(var);
+        let mut data = self.read_variable::<f64>(name)?;
+        if let Some(p) = params {
+            p.apply(&mut data);
+        }
+        Ok(data)
+    }
+
+    /// Read a variable, replace `_FillValue`/`missing_value` with NaN,
+    /// and mask values outside `valid_min`/`valid_max`/`valid_range`.
+    pub fn read_variable_masked(&self, name: &str) -> Result<ArrayD<f64>> {
+        let var = self.variable(name)?;
+        let params = masked::MaskParams::from_variable(var);
+        let mut data = self.read_variable::<f64>(name)?;
+        if let Some(p) = params {
+            p.apply(&mut data);
+        }
+        Ok(data)
+    }
+
+    /// Read a variable with both masking and unpacking (CF spec order).
+    ///
+    /// Order: read → mask fill/missing → unpack (scale+offset).
+    pub fn read_variable_unpacked_masked(&self, name: &str) -> Result<ArrayD<f64>> {
+        let var = self.variable(name)?;
+        let mask_params = masked::MaskParams::from_variable(var);
+        let unpack_params = unpack::UnpackParams::from_variable(var);
+        let mut data = self.read_variable::<f64>(name)?;
+        if let Some(p) = mask_params {
+            p.apply(&mut data);
+        }
+        if let Some(p) = unpack_params {
+            p.apply(&mut data);
+        }
+        Ok(data)
+    }
 }
 
 #[cfg(test)]
@@ -453,7 +498,7 @@ mod tests {
 
         assert_eq!(file.variables().len(), 1);
         let var = file.variable("vals").unwrap();
-        assert_eq!(var.dtype(), NcType::Float);
+        assert_eq!(var.dtype(), &NcType::Float);
         assert_eq!(var.shape(), vec![3]);
 
         // Read the actual data through the classic file.

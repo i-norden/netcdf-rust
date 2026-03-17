@@ -105,17 +105,22 @@ fn parse_header(data: &[u8], address: u64, offset_size: u8, length_size: u8) -> 
 /// Compute the super block layout.
 ///
 /// Returns a vec of (elements_per_data_block, num_data_blocks) for each super block.
+/// Stops generating entries once cumulative capacity exceeds `nelmts`.
 fn compute_super_block_layout(header: &EaHeader) -> Vec<(u64, u64)> {
     let mut layout = Vec::new();
     let dblk_min = header.data_blk_min_elmts as u64;
     let sblk_min = header.sec_blk_min_data_ptrs as u64;
+    let nelmts = header._nelmts;
+    let mut cumulative = header.idx_blk_elmts as u64;
 
-    // We generate super blocks until we exceed reasonable limits.
-    // In practice, HDF5 files use a small number of super blocks.
     for sb_idx in 0u32..64 {
+        if cumulative >= nelmts {
+            break;
+        }
         let elmts_per_dblk = dblk_min * (1u64 << (sb_idx / 2));
         let num_dblks = sblk_min * (1u64 << (sb_idx.div_ceil(2)));
         layout.push((elmts_per_dblk, num_dblks));
+        cumulative += elmts_per_dblk * num_dblks;
     }
 
     layout
@@ -374,20 +379,9 @@ pub fn collect_extensible_array_chunk_entries(
     // 3. Secondary block addresses for super blocks 2+.
     // nsblk_addrs = max(0, nsblks - ndblk_addrs) where nsblks is the total
     // number of super blocks needed to cover nelmts.
-    let nelmts = header._nelmts;
-
-    // Compute total super blocks needed (nsblks).
-    let mut nsblks = 0usize;
-    {
-        let mut covered = num_inline as u64;
-        for sb in &sb_layout {
-            if covered >= nelmts {
-                break;
-            }
-            covered += sb.0 * sb.1;
-            nsblks += 1;
-        }
-    }
+    // compute_super_block_layout already stops once capacity >= nelmts,
+    // so sb_layout.len() is the total number of super blocks needed.
+    let nsblks = sb_layout.len();
 
     let nsblk_addrs = nsblks.saturating_sub(ndblk_addrs);
     let mut sec_block_addrs = Vec::with_capacity(nsblk_addrs);
@@ -461,6 +455,9 @@ pub fn collect_extensible_array_chunk_entries(
             continue;
         }
 
+        // Per HDF5 spec III.H "Extensible Array Secondary Block", the secondary
+        // block contains a page initialization bitmap when data blocks are paged.
+        // Bitmap size = ceil(num_dblks * pages_per_dblk / 8).
         let page_bitmap_bytes = if header.max_dblk_page_nelmts_bits > 0
             && elmts_per_dblk > (1u64 << header.max_dblk_page_nelmts_bits)
         {

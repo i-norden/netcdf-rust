@@ -25,6 +25,8 @@ pub struct Group<'f> {
     length_size: u8,
     pub(crate) name: String,
     pub(crate) address: u64,
+    /// Address of the root group's object header, used for resolving soft links.
+    pub(crate) root_address: u64,
     pub(crate) chunk_cache: Arc<ChunkCache>,
     pub(crate) header_cache: Arc<Mutex<HashMap<u64, Arc<ObjectHeader>>>>,
     pub(crate) filter_registry: Arc<FilterRegistry>,
@@ -45,6 +47,7 @@ impl<'f> Group<'f> {
         name: String,
         offset_size: u8,
         length_size: u8,
+        root_address: u64,
         chunk_cache: Arc<ChunkCache>,
         header_cache: Arc<Mutex<HashMap<u64, Arc<ObjectHeader>>>>,
         filter_registry: Arc<FilterRegistry>,
@@ -55,6 +58,7 @@ impl<'f> Group<'f> {
             length_size,
             name,
             address,
+            root_address,
             chunk_cache,
             header_cache,
             filter_registry,
@@ -108,6 +112,7 @@ impl<'f> Group<'f> {
                     child.name.clone(),
                     self.offset_size,
                     self.length_size,
+                    self.root_address,
                     self.chunk_cache.clone(),
                     self.header_cache.clone(),
                     self.filter_registry.clone(),
@@ -129,6 +134,7 @@ impl<'f> Group<'f> {
                         child.name.clone(),
                         self.offset_size,
                         self.length_size,
+                        self.root_address,
                         self.chunk_cache.clone(),
                         self.header_cache.clone(),
                         self.filter_registry.clone(),
@@ -203,6 +209,11 @@ impl<'f> Group<'f> {
     /// Resolve children from the object header.
     /// Handles both old-style (symbol table) and new-style (link messages) groups.
     fn resolve_children(&self) -> Result<Vec<ChildEntry>> {
+        self.resolve_children_with_link_depth(0)
+    }
+
+    /// Resolve children with a soft-link depth counter to prevent cycles.
+    fn resolve_children_with_link_depth(&self, link_depth: u32) -> Result<Vec<ChildEntry>> {
         let header = self.cached_header(self.address)?;
 
         let mut children = Vec::new();
@@ -231,24 +242,12 @@ impl<'f> Group<'f> {
 
         if !found_symbol_table {
             // New-style group: use compact links from header messages
-            for link in &links {
-                match &link.target {
-                    LinkTarget::Hard { address } => {
-                        children.push(ChildEntry {
-                            name: link.name.clone(),
-                            address: *address,
-                        });
-                    }
-                    LinkTarget::Soft { .. } | LinkTarget::External { .. } => {
-                        // Skip soft and external links for now
-                    }
-                }
-            }
+            Self::resolve_link_targets(self, &links, link_depth, &mut children);
 
             // Dense-link storage can coexist with compact links, so merge both.
             if let Some(ref li) = link_info {
                 if !Cursor::is_undefined_offset(li.fractal_heap_address, self.offset_size) {
-                    for child in self.resolve_dense_links(li)? {
+                    for child in self.resolve_dense_links(li, link_depth)? {
                         let is_duplicate = children.iter().any(|existing| {
                             existing.name == child.name && existing.address == child.address
                         });
@@ -261,6 +260,36 @@ impl<'f> Group<'f> {
         }
 
         Ok(children)
+    }
+
+    /// Resolve link targets (hard and soft), appending to `children`.
+    fn resolve_link_targets(
+        &self,
+        links: &[LinkMessage],
+        link_depth: u32,
+        children: &mut Vec<ChildEntry>,
+    ) {
+        for link in links {
+            match &link.target {
+                LinkTarget::Hard { address } => {
+                    children.push(ChildEntry {
+                        name: link.name.clone(),
+                        address: *address,
+                    });
+                }
+                LinkTarget::Soft { path } => {
+                    if let Ok(address) = self.resolve_soft_link_depth(path, link_depth) {
+                        children.push(ChildEntry {
+                            name: link.name.clone(),
+                            address,
+                        });
+                    }
+                }
+                LinkTarget::External { .. } => {
+                    // External links reference other files; skip.
+                }
+            }
+        }
     }
 
     /// Resolve old-style group children via B-tree v1 + local heap.
@@ -299,7 +328,11 @@ impl<'f> Group<'f> {
     }
 
     /// Resolve dense links from a fractal heap + B-tree v2.
-    fn resolve_dense_links(&self, link_info: &LinkInfoMessage) -> Result<Vec<ChildEntry>> {
+    fn resolve_dense_links(
+        &self,
+        link_info: &LinkInfoMessage,
+        link_depth: u32,
+    ) -> Result<Vec<ChildEntry>> {
         // Parse the fractal heap at the link_info address.
         let mut heap_cursor = Cursor::new(self.file_data);
         heap_cursor.set_position(link_info.fractal_heap_address);
@@ -352,8 +385,16 @@ impl<'f> Group<'f> {
                         address: *address,
                     });
                 }
-                LinkTarget::Soft { .. } | LinkTarget::External { .. } => {
-                    // Skip soft and external links for now
+                LinkTarget::Soft { path } => {
+                    if let Ok(address) = self.resolve_soft_link_depth(path, link_depth) {
+                        children.push(ChildEntry {
+                            name: link_msg.name.clone(),
+                            address,
+                        });
+                    }
+                }
+                LinkTarget::External { .. } => {
+                    // External links reference other files; skip.
                 }
             }
         }
@@ -401,5 +442,67 @@ impl<'f> Group<'f> {
             Ok(is_group) => Ok(is_group),
             Err(_) => Ok(self.try_open_child_dataset(child).is_none()),
         }
+    }
+
+    /// Maximum nesting depth for soft link resolution.
+    /// HDF5 C library uses a default of 16.
+    const MAX_SOFT_LINK_DEPTH: u32 = 16;
+
+    fn resolve_soft_link_depth(&self, path: &str, depth: u32) -> Result<u64> {
+        if depth >= Self::MAX_SOFT_LINK_DEPTH {
+            return Err(Error::Other(format!(
+                "soft link resolution exceeded maximum depth ({}) — possible cycle at '{}'",
+                Self::MAX_SOFT_LINK_DEPTH,
+                path,
+            )));
+        }
+
+        let parts: Vec<&str> = path
+            .trim_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if parts.is_empty() {
+            return Ok(self.root_address);
+        }
+
+        // Start from root for absolute paths, from self for relative.
+        let start_addr = if path.starts_with('/') {
+            self.root_address
+        } else {
+            self.address
+        };
+
+        let mut current_group = Group::new(
+            self.file_data,
+            start_addr,
+            String::new(),
+            self.offset_size,
+            self.length_size,
+            self.root_address,
+            self.chunk_cache.clone(),
+            self.header_cache.clone(),
+            self.filter_registry.clone(),
+        );
+
+        // Navigate to the parent of the target
+        for &part in &parts[..parts.len() - 1] {
+            current_group = current_group.group(part)?;
+        }
+
+        // Find the target's address — resolve any soft links encountered along the way
+        let target_name = parts[parts.len() - 1];
+        let children = current_group.resolve_children_with_link_depth(depth + 1)?;
+        for child in &children {
+            if child.name == target_name {
+                return Ok(child.address);
+            }
+        }
+
+        Err(Error::Other(format!(
+            "soft link target '{}' not found",
+            path
+        )))
     }
 }

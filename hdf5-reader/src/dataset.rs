@@ -247,7 +247,7 @@ impl<'f> Dataset<'f> {
 
     /// Read the entire dataset into an n-dimensional array.
     pub fn read_array<T: H5Type>(&self) -> Result<ArrayD<T>> {
-        match &self.layout {
+        let result = match &self.layout {
             DataLayout::Compact { data } => self.read_compact::<T>(data),
             DataLayout::Contiguous { address, size } => self.read_contiguous::<T>(*address, *size),
             DataLayout::Chunked {
@@ -256,7 +256,8 @@ impl<'f> Dataset<'f> {
                 element_size,
                 chunk_indexing,
             } => self.read_chunked::<T>(*address, dims, *element_size, chunk_indexing.as_ref()),
-        }
+        };
+        result.map_err(|e| e.with_context(&self.name))
     }
 
     /// Read the entire dataset using internal chunk-level parallelism when possible.

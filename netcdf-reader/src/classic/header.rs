@@ -388,9 +388,14 @@ fn read_attr_values(
             }
             Ok(NcAttrValue::UInt64s(values))
         }
-        NcType::String => Err(Error::InvalidData(
-            "NC_STRING is not valid in classic format attributes".to_string(),
-        )),
+        NcType::String
+        | NcType::Compound { .. }
+        | NcType::Opaque { .. }
+        | NcType::Array { .. }
+        | NcType::VLen { .. } => Err(Error::InvalidData(format!(
+            "{:?} is not valid in classic format attributes",
+            typ
+        ))),
     }
 }
 
