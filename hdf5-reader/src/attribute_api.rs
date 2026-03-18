@@ -507,10 +507,11 @@ fn resolve_vlen_bytes(raw_data: &[u8], file_data: &[u8], offset_size: u8) -> Opt
 mod tests {
     use super::*;
     use crate::error::ByteOrder;
+    use std::f64::consts::PI;
 
     #[test]
     fn test_scalar_f64_attribute() {
-        let value: f64 = 3.14;
+        let value: f64 = PI;
         let raw_data = value.to_le_bytes().to_vec();
         let attr = Attribute {
             name: "pi".to_string(),
@@ -522,7 +523,7 @@ mod tests {
             raw_data,
         };
         let val = attr.read_scalar::<f64>().unwrap();
-        assert!((val - 3.14).abs() < 1e-10);
+        assert!((val - PI).abs() < 1e-10);
     }
 
     #[test]

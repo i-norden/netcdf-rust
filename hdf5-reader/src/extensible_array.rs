@@ -372,8 +372,8 @@ fn linear_target_offsets(
         for dim in (0..ndim).rev() {
             if chunk_indices[dim] < last_chunk[dim] {
                 chunk_indices[dim] += 1;
-                for reset_dim in dim + 1..ndim {
-                    chunk_indices[reset_dim] = first_chunk[reset_dim];
+                if dim + 1 < ndim {
+                    chunk_indices[(dim + 1)..ndim].copy_from_slice(&first_chunk[(dim + 1)..ndim]);
                 }
                 advanced = true;
                 break;

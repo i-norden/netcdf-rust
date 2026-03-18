@@ -147,9 +147,7 @@ mod tests {
             body.extend_from_slice(data);
             // Pad to 8-byte boundary
             let padded = (data.len() + 7) & !7;
-            for _ in data.len()..padded {
-                body.push(0);
-            }
+            body.resize(body.len() + (padded - data.len()), 0);
         }
         // Free space sentinel (index 0)
         body.extend_from_slice(&0u16.to_le_bytes());

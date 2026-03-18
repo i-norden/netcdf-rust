@@ -27,42 +27,56 @@ use crate::object_header::ObjectHeader;
 
 const HOT_FULL_DATASET_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
 
-#[cfg(feature = "rayon")]
 #[derive(Clone, Copy)]
 struct FlatBufferPtr {
     ptr: *mut u8,
     len: usize,
 }
 
-#[cfg(feature = "rayon")]
+#[derive(Clone, Copy)]
+struct ChunkCopyLayout<'a> {
+    chunk_offsets: &'a [u64],
+    chunk_shape: &'a [u64],
+    dataset_shape: &'a [u64],
+    dataset_strides: &'a [usize],
+    chunk_strides: &'a [usize],
+    elem_size: usize,
+}
+
+#[derive(Clone, Copy)]
+struct UnitStrideCopyLayout<'a> {
+    chunk_offsets: &'a [u64],
+    chunk_shape: &'a [u64],
+    dataset_shape: &'a [u64],
+    resolved: &'a ResolvedSelection,
+    chunk_strides: &'a [usize],
+    result_strides: &'a [usize],
+    elem_size: usize,
+}
+
+pub(crate) struct DatasetParseContext<'f> {
+    pub(crate) file_data: &'f [u8],
+    pub(crate) offset_size: u8,
+    pub(crate) length_size: u8,
+    pub(crate) chunk_cache: Arc<ChunkCache>,
+    pub(crate) filter_registry: Arc<FilterRegistry>,
+}
+
+#[derive(Clone, Copy)]
+struct ChunkEntrySelection<'a> {
+    shape: &'a [u64],
+    ndim: usize,
+    elem_size: usize,
+    chunk_bounds: Option<(&'a [u64], &'a [u64])>,
+}
+
 unsafe impl Send for FlatBufferPtr {}
 
-#[cfg(feature = "rayon")]
 unsafe impl Sync for FlatBufferPtr {}
 
-#[cfg(feature = "rayon")]
 impl FlatBufferPtr {
-    unsafe fn copy_chunk(
-        self,
-        chunk_data: &[u8],
-        chunk_offsets: &[u64],
-        chunk_shape: &[u64],
-        dataset_shape: &[u64],
-        dataset_strides: &[usize],
-        chunk_strides: &[usize],
-        elem_size: usize,
-    ) {
-        copy_chunk_to_flat_with_strides_ptr(
-            chunk_data,
-            self.ptr,
-            self.len,
-            chunk_offsets,
-            chunk_shape,
-            dataset_shape,
-            dataset_strides,
-            chunk_strides,
-            elem_size,
-        );
+    unsafe fn copy_chunk(self, chunk_data: &[u8], layout: ChunkCopyLayout<'_>) {
+        copy_chunk_to_flat_with_strides_ptr(chunk_data, self, layout);
     }
 
     unsafe fn copy_selected(
@@ -89,26 +103,9 @@ impl FlatBufferPtr {
     unsafe fn copy_unit_stride_chunk_overlap(
         self,
         chunk_data: &[u8],
-        chunk_offsets: &[u64],
-        chunk_shape: &[u64],
-        dataset_shape: &[u64],
-        resolved: &ResolvedSelection,
-        chunk_strides: &[usize],
-        result_strides: &[usize],
-        elem_size: usize,
+        layout: UnitStrideCopyLayout<'_>,
     ) -> Result<()> {
-        copy_unit_stride_chunk_overlap_ptr(
-            chunk_data,
-            self.ptr,
-            self.len,
-            chunk_offsets,
-            chunk_shape,
-            dataset_shape,
-            resolved,
-            chunk_strides,
-            result_strides,
-            elem_size,
-        )
+        copy_unit_stride_chunk_overlap_ptr(chunk_data, self, layout)
     }
 }
 
@@ -406,21 +403,22 @@ impl<'f> Dataset<'f> {
     }
 
     pub(crate) fn from_parsed_header(
-        file_data: &'f [u8],
+        context: DatasetParseContext<'f>,
         address: u64,
         name: String,
-        offset_size: u8,
-        length_size: u8,
         header: &ObjectHeader,
-        chunk_cache: Arc<ChunkCache>,
-        filter_registry: Arc<FilterRegistry>,
     ) -> Result<Self> {
         let mut dataspace: Option<DataspaceMessage> = None;
         let mut datatype: Option<Datatype> = None;
         let mut layout: Option<DataLayout> = None;
         let mut fill_value: Option<FillValueMessage> = None;
         let mut filter_pipeline: Option<FilterPipelineMessage> = None;
-        let attributes = collect_attribute_messages(&header, file_data, offset_size, length_size)?;
+        let attributes = collect_attribute_messages(
+            header,
+            context.file_data,
+            context.offset_size,
+            context.length_size,
+        )?;
 
         for msg in &header.messages {
             match msg {
@@ -453,9 +451,9 @@ impl<'f> Dataset<'f> {
         };
 
         Ok(Dataset {
-            file_data,
-            offset_size,
-            length_size,
+            file_data: context.file_data,
+            offset_size: context.offset_size,
+            length_size: context.length_size,
             name,
             data_address: address,
             dataspace,
@@ -464,11 +462,11 @@ impl<'f> Dataset<'f> {
             fill_value,
             filters: filter_pipeline,
             attributes,
-            chunk_cache,
+            chunk_cache: context.chunk_cache,
             chunk_entry_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(32).unwrap()))),
             full_chunk_entries: Arc::new(OnceLock::new()),
             full_dataset_bytes: Arc::new(OnceLock::new()),
-            filter_registry,
+            filter_registry: context.filter_registry,
         })
     }
 
@@ -714,10 +712,12 @@ impl<'f> Dataset<'f> {
             index_address,
             chunk_dims,
             chunk_indexing,
-            shape,
-            ndim,
-            elem_size,
-            None,
+            ChunkEntrySelection {
+                shape,
+                ndim,
+                elem_size,
+                chunk_bounds: None,
+            },
         )?;
 
         let full_chunk_coverage = entries.len() == full_dataset_chunk_count(shape, &chunk_shape)?;
@@ -748,14 +748,18 @@ impl<'f> Dataset<'f> {
                     unsafe {
                         copy_chunk_to_flat_with_strides_ptr(
                             &chunk_data,
-                            result_ptr,
-                            result_len,
-                            &entry.offsets,
-                            &chunk_shape,
-                            shape,
-                            &dataset_strides,
-                            &chunk_strides,
-                            elem_size,
+                            FlatBufferPtr {
+                                ptr: result_ptr,
+                                len: result_len,
+                            },
+                            ChunkCopyLayout {
+                                chunk_offsets: &entry.offsets,
+                                chunk_shape: &chunk_shape,
+                                dataset_shape: shape,
+                                dataset_strides: &dataset_strides,
+                                chunk_strides: &chunk_strides,
+                                elem_size,
+                            },
                         );
                     }
                 }
@@ -791,14 +795,18 @@ impl<'f> Dataset<'f> {
                 unsafe {
                     copy_chunk_to_flat_with_strides_ptr(
                         &chunk_data,
-                        flat_ptr,
-                        flat_len,
-                        &entry.offsets,
-                        &chunk_shape,
-                        shape,
-                        &dataset_strides,
-                        &chunk_strides,
-                        elem_size,
+                        FlatBufferPtr {
+                            ptr: flat_ptr,
+                            len: flat_len,
+                        },
+                        ChunkCopyLayout {
+                            chunk_offsets: &entry.offsets,
+                            chunk_shape: &chunk_shape,
+                            dataset_shape: shape,
+                            dataset_strides: &dataset_strides,
+                            chunk_strides: &chunk_strides,
+                            elem_size,
+                        },
                     );
                 }
             }
@@ -816,12 +824,14 @@ impl<'f> Dataset<'f> {
             copy_chunk_to_flat_with_strides(
                 &chunk_data,
                 &mut flat_data,
-                &entry.offsets,
-                &chunk_shape,
-                shape,
-                &dataset_strides,
-                &chunk_strides,
-                elem_size,
+                ChunkCopyLayout {
+                    chunk_offsets: &entry.offsets,
+                    chunk_shape: &chunk_shape,
+                    dataset_shape: shape,
+                    dataset_strides: &dataset_strides,
+                    chunk_strides: &chunk_strides,
+                    elem_size,
+                },
             );
         }
 
@@ -853,10 +863,12 @@ impl<'f> Dataset<'f> {
             index_address,
             chunk_dims,
             chunk_indexing,
-            shape,
-            ndim,
-            elem_size,
-            None,
+            ChunkEntrySelection {
+                shape,
+                ndim,
+                elem_size,
+                chunk_bounds: None,
+            },
         )?;
 
         // Dedup check: sort by output offsets and reject duplicates.
@@ -902,12 +914,14 @@ impl<'f> Dataset<'f> {
                             .map(|data| unsafe {
                                 flat.copy_chunk(
                                     &data,
-                                    &entry.offsets,
-                                    &chunk_shape,
-                                    shape,
-                                    &dataset_strides,
-                                    &chunk_strides,
-                                    elem_size,
+                                    ChunkCopyLayout {
+                                        chunk_offsets: &entry.offsets,
+                                        chunk_shape: &chunk_shape,
+                                        dataset_shape: shape,
+                                        dataset_strides: &dataset_strides,
+                                        chunk_strides: &chunk_strides,
+                                        elem_size,
+                                    },
                                 );
                             })
                     })
@@ -946,12 +960,14 @@ impl<'f> Dataset<'f> {
                         .map(|data| unsafe {
                             flat.copy_chunk(
                                 &data,
-                                &entry.offsets,
-                                &chunk_shape,
-                                shape,
-                                &dataset_strides,
-                                &chunk_strides,
-                                elem_size,
+                                ChunkCopyLayout {
+                                    chunk_offsets: &entry.offsets,
+                                    chunk_shape: &chunk_shape,
+                                    dataset_shape: shape,
+                                    dataset_strides: &dataset_strides,
+                                    chunk_strides: &chunk_strides,
+                                    elem_size,
+                                },
                             );
                         })
                 })
@@ -977,12 +993,14 @@ impl<'f> Dataset<'f> {
                     .map(|data| unsafe {
                         flat.copy_chunk(
                             &data,
-                            &entry.offsets,
-                            &chunk_shape,
-                            shape,
-                            &dataset_strides,
-                            &chunk_strides,
-                            elem_size,
+                            ChunkCopyLayout {
+                                chunk_offsets: &entry.offsets,
+                                chunk_shape: &chunk_shape,
+                                dataset_shape: shape,
+                                dataset_strides: &dataset_strides,
+                                chunk_strides: &chunk_strides,
+                                elem_size,
+                            },
                         );
                     })
             })
@@ -999,22 +1017,22 @@ impl<'f> Dataset<'f> {
         index_address: u64,
         chunk_dims: &[u32],
         chunk_indexing: Option<&ChunkIndexing>,
-        shape: &[u64],
-        ndim: usize,
-        elem_size: usize,
-        chunk_bounds: Option<(&[u64], &[u64])>,
+        selection: ChunkEntrySelection<'_>,
     ) -> Result<Vec<chunk_index::ChunkEntry>> {
-        if chunk_bounds.is_none() {
+        if selection.chunk_bounds.is_none() {
             if let Some(cached) = self.full_chunk_entries.get() {
                 return Ok((**cached).clone());
             }
         }
 
-        let cache_key = chunk_bounds.map(|(first_chunk, last_chunk)| ChunkEntryCacheKey {
-            index_address,
-            first_chunk: SmallVec::from_slice(first_chunk),
-            last_chunk: SmallVec::from_slice(last_chunk),
-        });
+        let cache_key =
+            selection
+                .chunk_bounds
+                .map(|(first_chunk, last_chunk)| ChunkEntryCacheKey {
+                    index_address,
+                    first_chunk: SmallVec::from_slice(first_chunk),
+                    last_chunk: SmallVec::from_slice(last_chunk),
+                });
 
         if let Some(ref key) = cache_key {
             let mut cache = self.chunk_entry_cache.lock();
@@ -1026,7 +1044,12 @@ impl<'f> Dataset<'f> {
         let entries = match chunk_indexing {
             None => {
                 // V1-V3: B-tree v1 chunk indexing
-                self.collect_btree_v1_entries(index_address, ndim, chunk_dims, chunk_bounds)
+                self.collect_btree_v1_entries(
+                    index_address,
+                    selection.ndim,
+                    chunk_dims,
+                    selection.chunk_bounds,
+                )
             }
             Some(ChunkIndexing::SingleChunk {
                 filtered_size,
@@ -1035,23 +1058,23 @@ impl<'f> Dataset<'f> {
                 index_address,
                 *filtered_size,
                 *filters,
-                ndim,
+                selection.ndim,
             )]),
             Some(ChunkIndexing::BTreeV2) => chunk_index::collect_v2_chunk_entries(
                 self.file_data,
                 index_address,
                 self.offset_size,
                 self.length_size,
-                ndim as u32,
+                selection.ndim as u32,
                 chunk_dims,
-                chunk_bounds,
+                selection.chunk_bounds,
             ),
             Some(ChunkIndexing::Implicit) => Ok(chunk_index::collect_implicit_chunk_entries(
                 index_address,
-                shape,
+                selection.shape,
                 chunk_dims,
-                elem_size,
-                chunk_bounds,
+                selection.elem_size,
+                selection.chunk_bounds,
             )),
             Some(ChunkIndexing::FixedArray { .. }) => {
                 crate::fixed_array::collect_fixed_array_chunk_entries(
@@ -1059,9 +1082,9 @@ impl<'f> Dataset<'f> {
                     index_address,
                     self.offset_size,
                     self.length_size,
-                    shape,
+                    selection.shape,
                     chunk_dims,
-                    chunk_bounds,
+                    selection.chunk_bounds,
                 )
             }
             Some(ChunkIndexing::ExtensibleArray { .. }) => {
@@ -1070,9 +1093,9 @@ impl<'f> Dataset<'f> {
                     index_address,
                     self.offset_size,
                     self.length_size,
-                    shape,
+                    selection.shape,
                     chunk_dims,
-                    chunk_bounds,
+                    selection.chunk_bounds,
                 )
             }
         }?;
@@ -1213,10 +1236,12 @@ impl<'f> Dataset<'f> {
             index_address,
             chunk_dims,
             chunk_indexing,
-            shape,
-            ndim,
-            elem_size,
-            Some((&first_chunk, &last_chunk)),
+            ChunkEntrySelection {
+                shape,
+                ndim,
+                elem_size,
+                chunk_bounds: Some((&first_chunk, &last_chunk)),
+            },
         )?;
 
         let result_total_bytes = checked_mul_usize(
@@ -1263,15 +1288,19 @@ impl<'f> Dataset<'f> {
                     unsafe {
                         copy_unit_stride_chunk_overlap_ptr(
                             &chunk_data,
-                            result_ptr,
-                            result_len,
-                            &entry.offsets,
-                            &chunk_shape,
-                            shape,
-                            resolved,
-                            &chunk_strides,
-                            &result_strides,
-                            elem_size,
+                            FlatBufferPtr {
+                                ptr: result_ptr,
+                                len: result_len,
+                            },
+                            UnitStrideCopyLayout {
+                                chunk_offsets: &entry.offsets,
+                                chunk_shape: &chunk_shape,
+                                dataset_shape: shape,
+                                resolved,
+                                chunk_strides: &chunk_strides,
+                                result_strides: &result_strides,
+                                elem_size,
+                            },
                         )?;
                     }
                 }
@@ -1292,15 +1321,19 @@ impl<'f> Dataset<'f> {
                 unsafe {
                     copy_unit_stride_chunk_overlap_ptr(
                         &chunk_data,
-                        result_ptr,
-                        result_len,
-                        &entry.offsets,
-                        &chunk_shape,
-                        shape,
-                        resolved,
-                        &chunk_strides,
-                        &result_strides,
-                        elem_size,
+                        FlatBufferPtr {
+                            ptr: result_ptr,
+                            len: result_len,
+                        },
+                        UnitStrideCopyLayout {
+                            chunk_offsets: &entry.offsets,
+                            chunk_shape: &chunk_shape,
+                            dataset_shape: shape,
+                            resolved,
+                            chunk_strides: &chunk_strides,
+                            result_strides: &result_strides,
+                            elem_size,
+                        },
                     )?;
                 }
             }
@@ -1353,13 +1386,15 @@ impl<'f> Dataset<'f> {
                 copy_unit_stride_chunk_overlap(
                     &chunk_data,
                     &mut result_buf,
-                    &entry.offsets,
-                    &chunk_shape,
-                    shape,
-                    resolved,
-                    &chunk_strides,
-                    &result_strides,
-                    elem_size,
+                    UnitStrideCopyLayout {
+                        chunk_offsets: &entry.offsets,
+                        chunk_shape: &chunk_shape,
+                        dataset_shape: shape,
+                        resolved,
+                        chunk_strides: &chunk_strides,
+                        result_strides: &result_strides,
+                        elem_size,
+                    },
                 )?;
                 continue;
             }
@@ -1459,10 +1494,12 @@ impl<'f> Dataset<'f> {
             index_address,
             chunk_dims,
             chunk_indexing,
-            shape,
-            ndim,
-            elem_size,
-            Some((&first_chunk, &last_chunk)),
+            ChunkEntrySelection {
+                shape,
+                ndim,
+                elem_size,
+                chunk_bounds: Some((&first_chunk, &last_chunk)),
+            },
         )?;
 
         // Allocate result buffer (raw bytes) initialized from fill value.
@@ -1514,13 +1551,15 @@ impl<'f> Dataset<'f> {
                         unsafe {
                             flat.copy_unit_stride_chunk_overlap(
                                 &chunk_data,
-                                &entry.offsets,
-                                &chunk_shape,
-                                shape,
-                                resolved,
-                                &chunk_strides,
-                                &result_strides,
-                                elem_size,
+                                UnitStrideCopyLayout {
+                                    chunk_offsets: &entry.offsets,
+                                    chunk_shape: &chunk_shape,
+                                    dataset_shape: shape,
+                                    resolved,
+                                    chunk_strides: &chunk_strides,
+                                    result_strides: &result_strides,
+                                    elem_size,
+                                },
                             )?;
                         }
 
@@ -1548,13 +1587,15 @@ impl<'f> Dataset<'f> {
                     unsafe {
                         flat.copy_unit_stride_chunk_overlap(
                             &chunk_data,
-                            &entry.offsets,
-                            &chunk_shape,
-                            shape,
-                            resolved,
-                            &chunk_strides,
-                            &result_strides,
-                            elem_size,
+                            UnitStrideCopyLayout {
+                                chunk_offsets: &entry.offsets,
+                                chunk_shape: &chunk_shape,
+                                dataset_shape: shape,
+                                resolved,
+                                chunk_strides: &chunk_strides,
+                                result_strides: &result_strides,
+                                elem_size,
+                            },
                         )?;
                     }
 
@@ -1587,13 +1628,15 @@ impl<'f> Dataset<'f> {
                     unsafe {
                         flat.copy_unit_stride_chunk_overlap(
                             &chunk_data,
-                            &entry.offsets,
-                            &chunk_shape,
-                            shape,
-                            resolved,
-                            &chunk_strides,
-                            &result_strides,
-                            elem_size,
+                            UnitStrideCopyLayout {
+                                chunk_offsets: &entry.offsets,
+                                chunk_shape: &chunk_shape,
+                                dataset_shape: shape,
+                                resolved,
+                                chunk_strides: &chunk_strides,
+                                result_strides: &result_strides,
+                                elem_size,
+                            },
                         )?;
                     }
                     return Ok(());
@@ -1911,80 +1954,69 @@ fn copy_chunk_to_flat(
     copy_chunk_to_flat_with_strides(
         chunk_data,
         flat,
-        chunk_offsets,
-        chunk_shape,
-        dataset_shape,
-        &dataset_strides,
-        &chunk_strides,
-        elem_size,
+        ChunkCopyLayout {
+            chunk_offsets,
+            chunk_shape,
+            dataset_shape,
+            dataset_strides: &dataset_strides,
+            chunk_strides: &chunk_strides,
+            elem_size,
+        },
     );
 }
 
 fn copy_chunk_to_flat_with_strides(
     chunk_data: &[u8],
     flat: &mut [u8],
-    chunk_offsets: &[u64],
-    chunk_shape: &[u64],
-    dataset_shape: &[u64],
-    dataset_strides: &[usize],
-    chunk_strides: &[usize],
-    elem_size: usize,
+    layout: ChunkCopyLayout<'_>,
 ) {
     unsafe {
         copy_chunk_to_flat_with_strides_ptr(
             chunk_data,
-            flat.as_mut_ptr(),
-            flat.len(),
-            chunk_offsets,
-            chunk_shape,
-            dataset_shape,
-            dataset_strides,
-            chunk_strides,
-            elem_size,
+            FlatBufferPtr {
+                ptr: flat.as_mut_ptr(),
+                len: flat.len(),
+            },
+            layout,
         );
     }
 }
 
 unsafe fn copy_chunk_to_flat_with_strides_ptr(
     chunk_data: &[u8],
-    flat_ptr: *mut u8,
-    flat_len: usize,
-    chunk_offsets: &[u64],
-    chunk_shape: &[u64],
-    dataset_shape: &[u64],
-    dataset_strides: &[usize],
-    chunk_strides: &[usize],
-    elem_size: usize,
+    flat: FlatBufferPtr,
+    layout: ChunkCopyLayout<'_>,
 ) {
-    let ndim = dataset_shape.len();
+    let ndim = layout.dataset_shape.len();
 
     if ndim == 0 {
-        let bytes = elem_size.min(chunk_data.len()).min(flat_len);
-        std::ptr::copy_nonoverlapping(chunk_data.as_ptr(), flat_ptr, bytes);
+        let bytes = layout.elem_size.min(chunk_data.len()).min(flat.len);
+        std::ptr::copy_nonoverlapping(chunk_data.as_ptr(), flat.ptr, bytes);
         return;
     }
 
     // Total elements in this chunk (clamped to dataset boundaries)
     let mut actual_chunk_shape = Vec::with_capacity(ndim);
     for i in 0..ndim {
-        let remaining = dataset_shape[i] - chunk_offsets[i];
-        actual_chunk_shape.push(remaining.min(chunk_shape[i]) as usize);
+        let remaining = layout.dataset_shape[i] - layout.chunk_offsets[i];
+        actual_chunk_shape.push(remaining.min(layout.chunk_shape[i]) as usize);
     }
 
     let row_elems = *actual_chunk_shape.last().unwrap_or(&1);
-    let row_bytes = row_elems * elem_size;
-    let dataset_origin: usize = chunk_offsets
+    let row_bytes = row_elems * layout.elem_size;
+    let dataset_origin: usize = layout
+        .chunk_offsets
         .iter()
         .enumerate()
-        .map(|(d, offset)| *offset as usize * dataset_strides[d])
+        .map(|(d, offset)| *offset as usize * layout.dataset_strides[d])
         .sum();
 
     if ndim == 1 {
         let bytes = row_bytes.min(chunk_data.len());
-        let dst_start = dataset_origin * elem_size;
+        let dst_start = dataset_origin * layout.elem_size;
         let dst_end = dst_start + bytes;
-        if dst_end <= flat_len {
-            std::ptr::copy_nonoverlapping(chunk_data.as_ptr(), flat_ptr.add(dst_start), bytes);
+        if dst_end <= flat.len {
+            std::ptr::copy_nonoverlapping(chunk_data.as_ptr(), flat.ptr.add(dst_start), bytes);
         }
         return;
     }
@@ -1996,19 +2028,19 @@ unsafe fn copy_chunk_to_flat_with_strides_ptr(
     for _ in 0..total_rows {
         let mut chunk_row = 0usize;
         let mut dataset_row = dataset_origin;
-        for d in 0..ndim - 1 {
-            chunk_row += outer_idx[d] * chunk_strides[d];
-            dataset_row += outer_idx[d] * dataset_strides[d];
+        for (d, outer) in outer_idx.iter().copied().enumerate() {
+            chunk_row += outer * layout.chunk_strides[d];
+            dataset_row += outer * layout.dataset_strides[d];
         }
 
-        let src_start = chunk_row * elem_size;
-        let dst_start = dataset_row * elem_size;
+        let src_start = chunk_row * layout.elem_size;
+        let dst_start = dataset_row * layout.elem_size;
         let src_end = src_start + row_bytes;
         let dst_end = dst_start + row_bytes;
-        if src_end <= chunk_data.len() && dst_end <= flat_len {
+        if src_end <= chunk_data.len() && dst_end <= flat.len {
             std::ptr::copy_nonoverlapping(
                 chunk_data.as_ptr().add(src_start),
-                flat_ptr.add(dst_start),
+                flat.ptr.add(dst_start),
                 row_bytes,
             );
         }
@@ -2076,26 +2108,16 @@ fn unit_stride_chunk_overlap_plan(
 fn copy_unit_stride_chunk_overlap(
     chunk_data: &[u8],
     result_buf: &mut [u8],
-    chunk_offsets: &[u64],
-    chunk_shape: &[u64],
-    dataset_shape: &[u64],
-    resolved: &ResolvedSelection,
-    chunk_strides: &[usize],
-    result_strides: &[usize],
-    elem_size: usize,
+    layout: UnitStrideCopyLayout<'_>,
 ) -> Result<()> {
     unsafe {
         copy_unit_stride_chunk_overlap_ptr(
             chunk_data,
-            result_buf.as_mut_ptr(),
-            result_buf.len(),
-            chunk_offsets,
-            chunk_shape,
-            dataset_shape,
-            resolved,
-            chunk_strides,
-            result_strides,
-            elem_size,
+            FlatBufferPtr {
+                ptr: result_buf.as_mut_ptr(),
+                len: result_buf.len(),
+            },
+            layout,
         )
     }
 }
@@ -2110,59 +2132,58 @@ fn copy_unit_stride_chunk_overlap(
 ///
 /// The caller must guarantee that `[result_ptr .. result_ptr + result_len)` is
 /// valid for writes. Concurrent callers must write to disjoint byte ranges.
-#[allow(clippy::too_many_arguments)]
 unsafe fn copy_unit_stride_chunk_overlap_ptr(
     chunk_data: &[u8],
-    result_ptr: *mut u8,
-    result_len: usize,
-    chunk_offsets: &[u64],
-    chunk_shape: &[u64],
-    dataset_shape: &[u64],
-    resolved: &ResolvedSelection,
-    chunk_strides: &[usize],
-    result_strides: &[usize],
-    elem_size: usize,
+    result: FlatBufferPtr,
+    layout: UnitStrideCopyLayout<'_>,
 ) -> Result<()> {
-    let ndim = dataset_shape.len();
+    let ndim = layout.dataset_shape.len();
 
     if ndim == 0 {
-        let bytes = elem_size.min(chunk_data.len()).min(result_len);
-        std::ptr::copy_nonoverlapping(chunk_data.as_ptr(), result_ptr, bytes);
+        let bytes = layout.elem_size.min(chunk_data.len()).min(result.len);
+        std::ptr::copy_nonoverlapping(chunk_data.as_ptr(), result.ptr, bytes);
         return Ok(());
     }
 
-    let (overlap_counts, chunk_local_start, result_start) =
-        unit_stride_chunk_overlap_plan(chunk_offsets, chunk_shape, dataset_shape, resolved)?;
+    let (overlap_counts, chunk_local_start, result_start) = unit_stride_chunk_overlap_plan(
+        layout.chunk_offsets,
+        layout.chunk_shape,
+        layout.dataset_shape,
+        layout.resolved,
+    )?;
     if overlap_counts.is_empty() {
         return Ok(());
     }
 
     let row_elems = *overlap_counts.last().unwrap_or(&1);
-    let row_bytes = checked_mul_usize(row_elems, elem_size, "unit-stride slice row bytes")?;
+    let row_bytes = checked_mul_usize(row_elems, layout.elem_size, "unit-stride slice row bytes")?;
 
     let mut chunk_origin = 0usize;
     let mut result_origin = 0usize;
     for d in 0..ndim {
         let chunk_term = checked_mul_usize(
             chunk_local_start[d],
-            chunk_strides[d],
+            layout.chunk_strides[d],
             "chunk overlap origin",
         )?;
-        let result_term =
-            checked_mul_usize(result_start[d], result_strides[d], "slice result origin")?;
+        let result_term = checked_mul_usize(
+            result_start[d],
+            layout.result_strides[d],
+            "slice result origin",
+        )?;
         chunk_origin = checked_add_usize(chunk_origin, chunk_term, "chunk overlap origin")?;
         result_origin = checked_add_usize(result_origin, result_term, "slice result origin")?;
     }
 
     if ndim == 1 {
-        let src_start = chunk_origin * elem_size;
-        let dst_start = result_origin * elem_size;
+        let src_start = chunk_origin * layout.elem_size;
+        let dst_start = result_origin * layout.elem_size;
         let src_end = src_start + row_bytes;
         let dst_end = dst_start + row_bytes;
-        if src_end <= chunk_data.len() && dst_end <= result_len {
+        if src_end <= chunk_data.len() && dst_end <= result.len {
             std::ptr::copy_nonoverlapping(
                 chunk_data.as_ptr().add(src_start),
-                result_ptr.add(dst_start),
+                result.ptr.add(dst_start),
                 row_bytes,
             );
         }
@@ -2176,19 +2197,19 @@ unsafe fn copy_unit_stride_chunk_overlap_ptr(
     for _ in 0..total_rows {
         let mut chunk_row = chunk_origin;
         let mut result_row = result_origin;
-        for d in 0..outer_idx.len() {
-            chunk_row += outer_idx[d] * chunk_strides[d];
-            result_row += outer_idx[d] * result_strides[d];
+        for (d, outer) in outer_idx.iter().copied().enumerate() {
+            chunk_row += outer * layout.chunk_strides[d];
+            result_row += outer * layout.result_strides[d];
         }
 
-        let src_start = chunk_row * elem_size;
-        let dst_start = result_row * elem_size;
+        let src_start = chunk_row * layout.elem_size;
+        let dst_start = result_row * layout.elem_size;
         let src_end = src_start + row_bytes;
         let dst_end = dst_start + row_bytes;
-        if src_end <= chunk_data.len() && dst_end <= result_len {
+        if src_end <= chunk_data.len() && dst_end <= result.len {
             std::ptr::copy_nonoverlapping(
                 chunk_data.as_ptr().add(src_start),
-                result_ptr.add(dst_start),
+                result.ptr.add(dst_start),
                 row_bytes,
             );
         }
@@ -2493,13 +2514,15 @@ mod tests {
         copy_unit_stride_chunk_overlap(
             &chunk_data,
             &mut result,
-            &chunk_offsets,
-            &chunk_shape,
-            &dataset_shape,
-            &resolved,
-            &chunk_strides,
-            &result_strides,
-            1,
+            UnitStrideCopyLayout {
+                chunk_offsets: &chunk_offsets,
+                chunk_shape: &chunk_shape,
+                dataset_shape: &dataset_shape,
+                resolved: &resolved,
+                chunk_strides: &chunk_strides,
+                result_strides: &result_strides,
+                elem_size: 1,
+            },
         )
         .unwrap();
 

@@ -175,7 +175,7 @@ mod tests {
     fn u32_le_datatype() -> Vec<u8> {
         let mut buf = Vec::new();
         // class=0, version=1, flags=0 (LE unsigned)
-        let class_word: u32 = 0x00 | (0x01 << 4);
+        let class_word: u32 = 0x01 << 4;
         buf.extend_from_slice(&class_word.to_le_bytes());
         buf.extend_from_slice(&4u32.to_le_bytes()); // size=4
                                                     // properties: offset=0, precision=32

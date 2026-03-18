@@ -661,6 +661,7 @@ mod tests {
     use super::*;
 
     /// Build a minimal BTHD with the given parameters.
+    #[allow(clippy::too_many_arguments)]
     fn build_header(
         btree_type: u8,
         node_size: u32,

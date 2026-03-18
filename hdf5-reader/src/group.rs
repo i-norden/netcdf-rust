@@ -445,14 +445,16 @@ impl<'f> Group<'f> {
     fn try_open_child_dataset(&self, child: &ChildEntry) -> Option<Dataset<'f>> {
         let header = self.cached_header(child.address).ok()?;
         Dataset::from_parsed_header(
-            self.file_data,
+            crate::dataset::DatasetParseContext {
+                file_data: self.file_data,
+                offset_size: self.offset_size,
+                length_size: self.length_size,
+                chunk_cache: self.chunk_cache.clone(),
+                filter_registry: self.filter_registry.clone(),
+            },
             child.address,
             child.name.clone(),
-            self.offset_size,
-            self.length_size,
             header.as_ref(),
-            self.chunk_cache.clone(),
-            self.filter_registry.clone(),
         )
         .ok()
     }

@@ -277,8 +277,8 @@ fn linear_target_offsets(
         for dim in (0..ndim).rev() {
             if chunk_indices[dim] < last_chunk[dim] {
                 chunk_indices[dim] += 1;
-                for reset_dim in dim + 1..ndim {
-                    chunk_indices[reset_dim] = first_chunk[reset_dim];
+                if dim + 1 < ndim {
+                    chunk_indices[(dim + 1)..ndim].copy_from_slice(&first_chunk[(dim + 1)..ndim]);
                 }
                 advanced = true;
                 break;
@@ -355,7 +355,7 @@ fn collect_fixed_array_chunk_entries_bounded(
 
     let mut page_offsets = vec![None; num_pages];
     let mut next_page_start = pages_start;
-    for page_idx in 0..num_pages {
+    for (page_idx, page_offset) in page_offsets.iter_mut().enumerate().take(num_pages) {
         let byte_idx = page_idx / 8;
         let bit_idx = page_idx % 8;
         let page_initialized =
@@ -373,7 +373,7 @@ fn collect_fixed_array_chunk_entries_bounded(
         };
 
         if page_initialized {
-            page_offsets[page_idx] = Some(next_page_start);
+            *page_offset = Some(next_page_start);
             next_page_start += (entries_in_page * entry_bytes + 4) as u64;
         }
     }
