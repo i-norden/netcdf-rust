@@ -111,7 +111,7 @@ fn build_cdf1_short_var(var_name: &str, values: &[i16], attrs: Vec<AttrSpec>) ->
     // vsize: number of bytes of data (including row padding to 4).
     // For non-record variables: total bytes rounded up to 4-byte multiple.
     let raw_bytes = dim_size as usize * 2; // i16 = 2 bytes each
-    let vsize = ((raw_bytes + 3) / 4) * 4;
+    let vsize = raw_bytes.div_ceil(4) * 4;
     buf.extend_from_slice(&(vsize as u32).to_be_bytes());
 
     // begin (data offset): right after this 4-byte field

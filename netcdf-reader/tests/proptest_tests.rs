@@ -6,11 +6,8 @@ use proptest::prelude::*;
 // Helpers: encode a Vec of numeric values as big-endian bytes
 // ---------------------------------------------------------------------------
 
-fn encode_be<T: Copy>(values: &[T]) -> Vec<u8>
-where
-    T: ToBeBytes,
-{
-    let mut buf = Vec::with_capacity(values.len() * std::mem::size_of::<T>());
+fn encode_be<T: Copy + ToBeBytes>(values: &[T]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(std::mem::size_of_val(values));
     for v in values {
         buf.extend_from_slice(v.to_be_bytes_vec().as_slice());
     }
