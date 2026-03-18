@@ -69,6 +69,10 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/bench-regression
       BENCH_THREAD_LIST: "1,4"
       BENCH_HOT_OPS_PER_THREAD: "128"
+      BENCH_SAMPLE_SIZE: "15"
+      BENCH_MEASUREMENT_TIME: "0.2"
+      BENCH_WARMUP_TIME: "0.2"
+      BENCH_REGRESSION_THRESHOLD_PERCENT: "10"
       BENCH_SMOKE_FILTER: "open_only/(cairn|netcdf_rust)/(cdf1_simple|large_nc4_compressed)|metadata_reuse_handle/(cairn|netcdf_rust)/(cdf1_simple|nc4_compressed)|read_full_reuse_handle/(cairn|netcdf_rust)/(nc4_compressed|large_nc4_compressed)|slice_reuse_handle_hdf5_backend/(cairn|netcdf_rust)/(nc4_compressed|large_nc4_compressed)|parallel_open_and_read/(cairn|netcdf_rust)_x(1|4)/large_nc4_compressed|parallel_metadata_batch/(cairn|netcdf_rust)_x(1|4)/nc4_basic|parallel_slice_batch/(cairn|netcdf_rust)_x(1|4)/nc4_compressed|read_full_internal_parallel/(cairn|netcdf_rust)_x(1|4)/(large_nc4_compressed|nc4_compressed)|read_full_internal_parallel_nocache/(cairn|netcdf_rust)_x(1|4)/large_nc4_compressed"
     steps:
       - uses: actions/checkout@v4
@@ -98,18 +102,26 @@ jobs:
           python testdata/generate_fixtures.py
           cargo bench -p netcdf-reader --bench compare_georust \
             "$BENCH_SMOKE_FILTER" \
-            -- --noplot --sample-size 10 --measurement-time 0.1 --warm-up-time 0.1 --save-baseline base
+            -- --noplot \
+            --sample-size "$BENCH_SAMPLE_SIZE" \
+            --measurement-time "$BENCH_MEASUREMENT_TIME" \
+            --warm-up-time "$BENCH_WARMUP_TIME" \
+            --save-baseline base
 
       - name: Run PR benchmarks
         run: |
           cargo bench -p netcdf-reader --bench compare_georust \
             "$BENCH_SMOKE_FILTER" \
-            -- --noplot --sample-size 10 --measurement-time 0.1 --warm-up-time 0.1 --save-baseline pr
+            -- --noplot \
+            --sample-size "$BENCH_SAMPLE_SIZE" \
+            --measurement-time "$BENCH_MEASUREMENT_TIME" \
+            --warm-up-time "$BENCH_WARMUP_TIME" \
+            --save-baseline pr
 
       - name: Compare (fail on >10% regression)
         run: |
-          echo "Benchmark deltas >=10%:"
-          critcmp base pr --target-dir "$CARGO_TARGET_DIR" --threshold 10 || true
+          echo "Benchmark deltas >=${BENCH_REGRESSION_THRESHOLD_PERCENT}%:"
+          critcmp base pr --target-dir "$CARGO_TARGET_DIR" --threshold "$BENCH_REGRESSION_THRESHOLD_PERCENT" || true
 
           python3 - <<'PY'
           import json
@@ -117,7 +129,8 @@ jobs:
           import sys
           from pathlib import Path
 
-          threshold = 1.10
+          threshold_percent = float(os.environ["BENCH_REGRESSION_THRESHOLD_PERCENT"])
+          threshold = 1.0 + threshold_percent / 100.0
           target = Path(os.environ["CARGO_TARGET_DIR"]) / "criterion"
           base_files = sorted(target.glob("**/base/estimates.json"))
           pr_files = sorted(target.glob("**/pr/estimates.json"))
@@ -156,9 +169,14 @@ jobs:
                   continue
 
               with base_file.open() as fh:
-                  base_mean = json.load(fh)["mean"]["point_estimate"]
+                  base_estimates = json.load(fh)
               with pr_file.open() as fh:
-                  pr_mean = json.load(fh)["mean"]["point_estimate"]
+                  pr_estimates = json.load(fh)
+
+              # Median is more robust than mean for short smoke-style CI runs on
+              # noisy shared runners.
+              base_mean = base_estimates["median"]["point_estimate"]
+              pr_mean = pr_estimates["median"]["point_estimate"]
 
               if base_mean <= 0 or pr_mean <= 0:
                   continue
@@ -182,7 +200,11 @@ jobs:
               return f"{value:.1f}ns"
 
           if regressions:
-              print("Benchmark regressions >10% (PR mean / base mean):", file=sys.stderr)
+              print(
+                  f"Benchmark regressions >{threshold_percent:.0f}% "
+                  "(PR median / base median):",
+                  file=sys.stderr,
+              )
               for ratio, name, base_mean, pr_mean in sorted(regressions, reverse=True):
                   print(
                       f"  {name:70} {ratio:5.2f}x  "
@@ -191,5 +213,5 @@ jobs:
                   )
               sys.exit(1)
 
-          print("No benchmark regressions >10% detected.")
+          print(f"No benchmark regressions >{threshold_percent:.0f}% detected.")
           PY
