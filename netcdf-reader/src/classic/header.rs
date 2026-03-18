@@ -987,7 +987,7 @@ mod tests {
 
     #[test]
     fn test_float_attribute() {
-        let val = 3.14f32;
+        let val = std::f32::consts::PI;
         let value_bytes = val.to_be_bytes();
         let data = build_cdf1_header(
             &[],
@@ -998,7 +998,7 @@ mod tests {
         let header = parse_header(&data, NcFormat::Classic).unwrap();
         if let NcAttrValue::Floats(ref v) = header.global_attributes[0].value {
             assert_eq!(v.len(), 1);
-            assert!((v[0] - 3.14f32).abs() < 1e-6);
+            assert!((v[0] - std::f32::consts::PI).abs() < 1e-6);
         } else {
             panic!("expected Floats attribute");
         }

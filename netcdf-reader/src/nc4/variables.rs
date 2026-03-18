@@ -71,22 +71,9 @@ pub fn extract_variables_from_datasets(
         // Detect if this variable uses an unlimited dimension
         let is_unlimited = var_dims.iter().any(|d| d.is_unlimited);
 
-        // Compute data size
         let shape = ds.shape();
-        let elem_size = nc_type.size() as u64;
-        let total_elements: u64 = if shape.is_empty() {
-            1
-        } else {
-            shape.iter().product()
-        };
-        let data_size = total_elements * elem_size;
-
-        // Compute record size (size per element along the first dim)
-        let record_size = if is_unlimited && shape.len() > 1 {
-            shape[1..].iter().product::<u64>() * elem_size
-        } else {
-            elem_size
-        };
+        let (data_size, record_size) =
+            compute_storage_sizes(shape, nc_type.size() as u64, is_unlimited)?;
 
         // Extract variable-level attributes
         let var_attrs = attributes::extract_variable_attributes(ds)?;
@@ -193,6 +180,26 @@ fn resolve_variable_dimensions_from_dimlist(
     Some(var_dims)
 }
 
+fn compute_storage_sizes(shape: &[u64], elem_size: u64, is_unlimited: bool) -> Result<(u64, u64)> {
+    let total_elements =
+        crate::types::checked_shape_elements(shape, "NetCDF-4 variable element count")?;
+    let data_size = crate::types::checked_mul_u64(
+        total_elements,
+        elem_size,
+        "NetCDF-4 variable size in bytes",
+    )?;
+
+    let record_elements = if is_unlimited && shape.len() > 1 {
+        crate::types::checked_shape_elements(&shape[1..], "NetCDF-4 record element count")?
+    } else {
+        1
+    };
+    let record_size =
+        crate::types::checked_mul_u64(record_elements, elem_size, "NetCDF-4 record size in bytes")?;
+
+    Ok((data_size, record_size))
+}
+
 /// Resolve dimensions for a variable by matching its shape against the
 /// group's dimensions. Falls back to anonymous dimensions from the shape.
 fn resolve_variable_dimensions_by_size(
@@ -236,4 +243,22 @@ fn resolve_variable_dimensions_by_size(
     }
 
     var_dims
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_storage_sizes;
+
+    #[test]
+    fn test_compute_storage_sizes_detects_overflow() {
+        let err = compute_storage_sizes(&[u64::MAX, 2], 8, false).unwrap_err();
+        assert!(matches!(err, crate::Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn test_compute_storage_sizes_record_dims() {
+        let (data_size, record_size) = compute_storage_sizes(&[10, 3, 4], 4, true).unwrap();
+        assert_eq!(data_size, 480);
+        assert_eq!(record_size, 48);
+    }
 }

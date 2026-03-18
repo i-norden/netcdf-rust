@@ -142,12 +142,26 @@ pub fn read_non_record_variable<T: NcReadType>(
         ));
     }
 
-    let offset = var.data_offset as usize;
-    let total_elements = var.num_elements() as usize;
+    let offset = crate::types::checked_usize_from_u64(var.data_offset, "variable data offset")?;
+    let total_elements = crate::types::checked_usize_from_u64(
+        var.checked_num_elements()?,
+        "variable element count",
+    )?;
     let elem_size = T::element_size();
-    let total_bytes = total_elements * elem_size;
+    let total_bytes = total_elements.checked_mul(elem_size).ok_or_else(|| {
+        Error::InvalidData(format!(
+            "variable '{}' size in bytes exceeds platform usize",
+            var.name
+        ))
+    })?;
 
-    if offset + total_bytes > file_data.len() {
+    let end = offset.checked_add(total_bytes).ok_or_else(|| {
+        Error::InvalidData(format!(
+            "variable '{}' byte range exceeds platform usize",
+            var.name
+        ))
+    })?;
+    if end > file_data.len() {
         return Err(Error::InvalidData(format!(
             "variable '{}' data extends beyond file: offset={}, size={}, file_len={}",
             var.name,
@@ -157,10 +171,14 @@ pub fn read_non_record_variable<T: NcReadType>(
         )));
     }
 
-    let data_slice = &file_data[offset..offset + total_bytes];
+    let data_slice = &file_data[offset..end];
     let values = T::decode_bulk_be(data_slice, total_elements)?;
 
-    let shape: Vec<usize> = var.shape().iter().map(|&s| s as usize).collect();
+    let shape: Vec<usize> = var
+        .shape()
+        .iter()
+        .map(|&s| crate::types::checked_usize_from_u64(s, "variable dimension"))
+        .collect::<Result<Vec<_>>>()?;
     if shape.is_empty() {
         // Scalar variable.
         ArrayD::from_shape_vec(IxDyn(&[]), values)
@@ -194,33 +212,70 @@ pub fn read_record_variable<T: NcReadType>(
     }
 
     let elem_size = T::element_size();
-    let base_offset = var.data_offset as usize;
+    let base_offset =
+        crate::types::checked_usize_from_u64(var.data_offset, "record variable data offset")?;
+    let numrecs_usize = crate::types::checked_usize_from_u64(numrecs, "record count")?;
+    let record_stride_usize = crate::types::checked_usize_from_u64(record_stride, "record stride")?;
 
     // Shape: the first dimension is the unlimited dimension, replaced by numrecs.
-    let mut shape: Vec<usize> = var.shape().iter().map(|&s| s as usize).collect();
+    let mut shape: Vec<usize> = var
+        .shape()
+        .iter()
+        .map(|&s| crate::types::checked_usize_from_u64(s, "record variable dimension"))
+        .collect::<Result<Vec<_>>>()?;
     if shape.is_empty() {
         return Err(Error::InvalidData(
             "record variable must have at least one dimension".to_string(),
         ));
     }
-    shape[0] = numrecs as usize;
+    shape[0] = numrecs_usize;
 
     // Number of elements per record (product of all dims except the first).
     let elements_per_record: usize = shape[1..].iter().product::<usize>().max(1);
-    let bytes_per_record = elements_per_record * elem_size;
-    let total_elements = numrecs as usize * elements_per_record;
+    let bytes_per_record = elements_per_record.checked_mul(elem_size).ok_or_else(|| {
+        Error::InvalidData(format!(
+            "record variable '{}' bytes per record exceed platform usize",
+            var.name
+        ))
+    })?;
+    let total_elements = numrecs_usize
+        .checked_mul(elements_per_record)
+        .ok_or_else(|| {
+            Error::InvalidData(format!(
+                "record variable '{}' element count exceeds platform usize",
+                var.name
+            ))
+        })?;
 
     let mut values = Vec::with_capacity(total_elements);
 
-    for rec in 0..numrecs as usize {
-        let rec_offset = base_offset + rec * record_stride as usize;
-        if rec_offset + bytes_per_record > file_data.len() {
+    for rec in 0..numrecs_usize {
+        let rec_offset = base_offset
+            .checked_add(rec.checked_mul(record_stride_usize).ok_or_else(|| {
+                Error::InvalidData(format!(
+                    "record variable '{}' byte offset exceeds platform usize",
+                    var.name
+                ))
+            })?)
+            .ok_or_else(|| {
+                Error::InvalidData(format!(
+                    "record variable '{}' byte offset exceeds platform usize",
+                    var.name
+                ))
+            })?;
+        let rec_end = rec_offset.checked_add(bytes_per_record).ok_or_else(|| {
+            Error::InvalidData(format!(
+                "record variable '{}' record range exceeds platform usize",
+                var.name
+            ))
+        })?;
+        if rec_end > file_data.len() {
             return Err(Error::InvalidData(format!(
                 "record {} for variable '{}' extends beyond file",
                 rec, var.name
             )));
         }
-        let rec_slice = &file_data[rec_offset..rec_offset + bytes_per_record];
+        let rec_slice = &file_data[rec_offset..rec_end];
         let rec_values = T::decode_bulk_be(rec_slice, elements_per_record)?;
         values.extend(rec_values);
     }
@@ -407,5 +462,61 @@ mod tests {
         assert_eq!(arr[[0, 1]], 2.0);
         assert_eq!(arr[[1, 0]], 3.0);
         assert_eq!(arr[[2, 1]], 6.0);
+    }
+
+    #[test]
+    fn test_read_non_record_variable_rejects_element_count_overflow() {
+        let var = NcVariable {
+            name: "huge".to_string(),
+            dimensions: vec![
+                NcDimension {
+                    name: "y".to_string(),
+                    size: u64::MAX,
+                    is_unlimited: false,
+                },
+                NcDimension {
+                    name: "x".to_string(),
+                    size: 2,
+                    is_unlimited: false,
+                },
+            ],
+            dtype: NcType::Float,
+            attributes: vec![],
+            data_offset: 0,
+            _data_size: 0,
+            is_record_var: false,
+            record_size: 0,
+        };
+
+        let err = read_non_record_variable::<f32>(&[], &var).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn test_read_record_variable_rejects_record_offset_overflow() {
+        let var = NcVariable {
+            name: "huge_record".to_string(),
+            dimensions: vec![
+                NcDimension {
+                    name: "time".to_string(),
+                    size: 0,
+                    is_unlimited: true,
+                },
+                NcDimension {
+                    name: "x".to_string(),
+                    size: 1,
+                    is_unlimited: false,
+                },
+            ],
+            dtype: NcType::Float,
+            attributes: vec![],
+            data_offset: u64::MAX,
+            _data_size: 0,
+            is_record_var: true,
+            record_size: 4,
+        };
+
+        let err = read_record_variable::<f32>(&[], &var, 1, 4).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
     }
 }

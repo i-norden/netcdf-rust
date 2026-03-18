@@ -161,12 +161,31 @@ impl ClassicFile {
 
             if can_direct {
                 let elem_size = T::element_size();
-                let row_elements: u64 = shape[1..].iter().product::<u64>().max(1);
-                let row_bytes = row_elements as usize * elem_size;
+                let row_elements = crate::types::checked_shape_elements(
+                    &shape[1..],
+                    "classic slice row element count",
+                )?
+                .max(1);
+                let row_bytes = crate::types::checked_usize_from_u64(
+                    crate::types::checked_mul_u64(
+                        row_elements,
+                        elem_size as u64,
+                        "classic slice row size in bytes",
+                    )?,
+                    "classic slice row size in bytes",
+                )?;
 
                 let (first_row, num_rows, result_shape) = match &selection.selections[0] {
                     NcSliceInfoElem::Index(idx) => {
-                        let rs: Vec<usize> = shape[1..].iter().map(|&d| d as usize).collect();
+                        let rs: Vec<usize> = shape[1..]
+                            .iter()
+                            .map(|&d| {
+                                crate::types::checked_usize_from_u64(
+                                    d,
+                                    "classic slice result dimension",
+                                )
+                            })
+                            .collect::<Result<Vec<_>>>()?;
                         (*idx, 1u64, rs)
                     }
                     NcSliceInfoElem::Slice { start, end, step } => {
@@ -177,8 +196,21 @@ impl ClassicFile {
                         };
                         let count = (actual_end - start).div_ceil(*step);
                         if *step == 1 {
-                            let mut rs = vec![count as usize];
-                            rs.extend(shape[1..].iter().map(|&d| d as usize));
+                            let mut rs = vec![crate::types::checked_usize_from_u64(
+                                count,
+                                "classic slice result dimension",
+                            )?];
+                            rs.extend(
+                                shape[1..]
+                                    .iter()
+                                    .map(|&d| {
+                                        crate::types::checked_usize_from_u64(
+                                            d,
+                                            "classic slice result dimension",
+                                        )
+                                    })
+                                    .collect::<Result<Vec<_>>>()?,
+                            );
                             (*start, count, rs)
                         } else {
                             // Step > 1: can't do contiguous read, fall through.
@@ -190,18 +222,54 @@ impl ClassicFile {
                     }
                 };
 
-                let byte_offset = var.data_offset as usize + first_row as usize * row_bytes;
-                let total_bytes = num_rows as usize * row_bytes;
-                let total_elements = num_rows as usize * row_elements as usize;
+                let byte_offset = crate::types::checked_usize_from_u64(
+                    var.data_offset,
+                    "classic slice data offset",
+                )?
+                .checked_add(
+                    crate::types::checked_usize_from_u64(first_row, "classic slice row offset")?
+                        .checked_mul(row_bytes)
+                        .ok_or_else(|| {
+                            Error::InvalidData(
+                                "classic slice byte offset exceeds platform usize".to_string(),
+                            )
+                        })?,
+                )
+                .ok_or_else(|| {
+                    Error::InvalidData(
+                        "classic slice byte offset exceeds platform usize".to_string(),
+                    )
+                })?;
+                let total_bytes =
+                    crate::types::checked_usize_from_u64(num_rows, "classic slice row count")?
+                        .checked_mul(row_bytes)
+                        .ok_or_else(|| {
+                            Error::InvalidData(
+                                "classic slice byte count exceeds platform usize".to_string(),
+                            )
+                        })?;
+                let total_elements = crate::types::checked_usize_from_u64(
+                    crate::types::checked_mul_u64(
+                        num_rows,
+                        row_elements,
+                        "classic slice element count",
+                    )?,
+                    "classic slice element count",
+                )?;
 
-                if byte_offset + total_bytes > file_data.len() {
+                let end = byte_offset.checked_add(total_bytes).ok_or_else(|| {
+                    Error::InvalidData(
+                        "classic slice byte range exceeds platform usize".to_string(),
+                    )
+                })?;
+                if end > file_data.len() {
                     return Err(Error::InvalidData(format!(
                         "variable '{}' slice data extends beyond file",
                         var.name
                     )));
                 }
 
-                let data_slice = &file_data[byte_offset..byte_offset + total_bytes];
+                let data_slice = &file_data[byte_offset..end];
                 let values = T::decode_bulk_be(data_slice, total_elements)?;
 
                 return ndarray::ArrayD::from_shape_vec(IxDyn(&result_shape), values)

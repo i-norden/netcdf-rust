@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+documentation = "https://docs.rs/hdf5-reader"
+keywords = ["hdf5", "decoder", "scientific-data", "read-only"]
+categories = ["science", "parser-implementations"]
 
 [dependencies]
 ndarray = { workspace = true }

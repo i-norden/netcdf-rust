@@ -246,6 +246,10 @@ impl NcVariable {
         }
         self.dimensions.iter().map(|d| d.size).product()
     }
+
+    pub(crate) fn checked_num_elements(&self) -> crate::Result<u64> {
+        checked_shape_elements(&self.shape(), "variable element count")
+    }
 }
 
 /// A NetCDF group (NetCDF-4 only; classic files have one implicit root group).
@@ -307,6 +311,22 @@ fn split_parent_path(path: &str) -> Option<(&str, &str)> {
         Some(_) => None,
         None => Some(("", trimmed)),
     }
+}
+
+pub(crate) fn checked_usize_from_u64(value: u64, context: &str) -> crate::Result<usize> {
+    usize::try_from(value)
+        .map_err(|_| crate::Error::InvalidData(format!("{context} exceeds platform usize")))
+}
+
+pub(crate) fn checked_mul_u64(lhs: u64, rhs: u64, context: &str) -> crate::Result<u64> {
+    lhs.checked_mul(rhs)
+        .ok_or_else(|| crate::Error::InvalidData(format!("{context} exceeds u64 capacity")))
+}
+
+pub(crate) fn checked_shape_elements(shape: &[u64], context: &str) -> crate::Result<u64> {
+    shape
+        .iter()
+        .try_fold(1u64, |acc, &dim| checked_mul_u64(acc, dim, context))
 }
 
 /// Hyperslab selection for reading slices of NetCDF variables.
@@ -476,5 +496,11 @@ mod tests {
                 .unwrap(),
             "hPa"
         );
+    }
+
+    #[test]
+    fn test_checked_shape_elements_overflow() {
+        let err = checked_shape_elements(&[u64::MAX, 2], "test overflow").unwrap_err();
+        assert!(matches!(err, crate::Error::InvalidData(_)));
     }
 }
