@@ -64,6 +64,7 @@ fn test_simple_chunked_deflate() {
     assert!((data[[1, 0]] - 20.0).abs() < 1e-6);
 }
 
+#[cfg(feature = "rayon")]
 #[test]
 fn test_simple_chunked_deflate_parallel_matches_serial() {
     let path = skip_if_missing!("simple_chunked_deflate.h5");
@@ -329,6 +330,64 @@ fn test_chunked_slice_range_with_step() {
 }
 
 #[test]
+fn test_chunked_slice_empty_range_is_empty() {
+    let path = skip_if_missing!("simple_chunked_deflate.h5");
+    let file = hdf5_reader::Hdf5File::open(&path).unwrap();
+
+    let ds = file.dataset("/temperature").unwrap();
+    let selection = hdf5_reader::SliceInfo {
+        selections: vec![
+            hdf5_reader::SliceInfoElem::Slice {
+                start: 8,
+                end: 4,
+                step: 1,
+            },
+            hdf5_reader::SliceInfoElem::Slice {
+                start: 0,
+                end: 10,
+                step: 1,
+            },
+        ],
+    };
+
+    let sliced: ndarray::ArrayD<f32> = ds.read_slice(&selection).unwrap();
+    assert_eq!(sliced.shape(), &[0, 10]);
+    assert_eq!(sliced.len(), 0);
+}
+
+#[test]
+fn test_chunked_slice_start_out_of_bounds_errors() {
+    let path = skip_if_missing!("simple_chunked_deflate.h5");
+    let file = hdf5_reader::Hdf5File::open(&path).unwrap();
+
+    let ds = file.dataset("/temperature").unwrap();
+    let selection = hdf5_reader::SliceInfo {
+        selections: vec![
+            hdf5_reader::SliceInfoElem::Slice {
+                start: 11,
+                end: 12,
+                step: 1,
+            },
+            hdf5_reader::SliceInfoElem::Slice {
+                start: 0,
+                end: 10,
+                step: 1,
+            },
+        ],
+    };
+
+    let err = ds.read_slice::<f32>(&selection).unwrap_err();
+    assert!(matches!(
+        err,
+        hdf5_reader::error::Error::SliceOutOfBounds {
+            dim: 0,
+            index: 11,
+            size: 10
+        }
+    ));
+}
+
+#[test]
 fn test_chunked_shuffle_deflate() {
     let path = skip_if_missing!("chunked_shuffle_deflate.h5");
     let file = hdf5_reader::Hdf5File::open(&path).unwrap();
@@ -343,6 +402,7 @@ fn test_chunked_shuffle_deflate() {
     assert!(data.iter().all(|v| v.is_finite()));
 }
 
+#[cfg(feature = "lz4")]
 #[test]
 fn test_chunked_lz4() {
     let path = skip_if_missing!("chunked_lz4.h5");
@@ -360,6 +420,7 @@ fn test_chunked_lz4() {
     assert!((data[[9, 19]] - 199.0).abs() < 1e-6);
 }
 
+#[cfg(feature = "lz4")]
 #[test]
 fn test_chunked_lz4_compressed() {
     // This fixture has all-zero data that actually compresses with LZ4

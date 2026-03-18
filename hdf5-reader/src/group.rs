@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use crate::attribute_api::{collect_attribute_messages, Attribute};
 use crate::btree_v1;
@@ -70,6 +72,11 @@ impl<'f> Group<'f> {
         &self.name
     }
 
+    /// Object header address of this group within the file.
+    pub fn address(&self) -> u64 {
+        self.address
+    }
+
     /// Access the raw file data backing this group.
     pub fn file_data(&self) -> &'f [u8] {
         self.file_data
@@ -88,22 +95,35 @@ impl<'f> Group<'f> {
     /// Parse (or retrieve from cache) the object header at the given address.
     fn cached_header(&self, addr: u64) -> Result<Arc<ObjectHeader>> {
         {
-            let cache = self.header_cache.lock().unwrap();
+            let cache = self.header_cache.lock();
             if let Some(hdr) = cache.get(&addr) {
                 return Ok(Arc::clone(hdr));
             }
         }
-        let hdr = ObjectHeader::parse_at(self.file_data, addr, self.offset_size, self.length_size)?;
+        let mut hdr =
+            ObjectHeader::parse_at(self.file_data, addr, self.offset_size, self.length_size)?;
+        hdr.resolve_shared_messages(self.file_data, self.offset_size, self.length_size)?;
         let arc = Arc::new(hdr);
-        let mut cache = self.header_cache.lock().unwrap();
+        let mut cache = self.header_cache.lock();
         cache.insert(addr, Arc::clone(&arc));
         Ok(arc)
     }
 
     /// List all child groups.
     pub fn groups(&self) -> Result<Vec<Group<'f>>> {
+        let (groups, _) = self.resolve_member_objects()?;
+        Ok(groups)
+    }
+
+    /// List all child members, partitioned into groups and datasets.
+    pub fn members(&self) -> Result<(Vec<Group<'f>>, Vec<Dataset<'f>>)> {
+        self.resolve_member_objects()
+    }
+
+    fn resolve_member_objects(&self) -> Result<(Vec<Group<'f>>, Vec<Dataset<'f>>)> {
         let children = self.resolve_children()?;
         let mut groups = Vec::new();
+        let mut datasets = Vec::new();
         for child in &children {
             if self.child_is_group(child)? {
                 groups.push(Group::new(
@@ -117,9 +137,11 @@ impl<'f> Group<'f> {
                     self.header_cache.clone(),
                     self.filter_registry.clone(),
                 ));
+            } else if let Some(dataset) = self.try_open_child_dataset(child) {
+                datasets.push(dataset);
             }
         }
-        Ok(groups)
+        Ok((groups, datasets))
     }
 
     /// Get a child group by name.
@@ -152,15 +174,7 @@ impl<'f> Group<'f> {
 
     /// List all child datasets.
     pub fn datasets(&self) -> Result<Vec<Dataset<'f>>> {
-        let children = self.resolve_children()?;
-        let mut datasets = Vec::new();
-        for child in &children {
-            if !self.child_is_group(child)? {
-                if let Some(dataset) = self.try_open_child_dataset(child) {
-                    datasets.push(dataset);
-                }
-            }
-        }
+        let (_, datasets) = self.resolve_member_objects()?;
         Ok(datasets)
     }
 
@@ -181,7 +195,7 @@ impl<'f> Group<'f> {
     /// List attributes on this group.
     pub fn attributes(&self) -> Result<Vec<Attribute>> {
         let mut header = (*self.cached_header(self.address)?).clone();
-        header.resolve_shared_messages(self.file_data, self.offset_size, self.length_size);
+        header.resolve_shared_messages(self.file_data, self.offset_size, self.length_size)?;
         Ok(
             collect_attribute_messages(
                 &header,
@@ -306,6 +320,8 @@ impl<'f> Group<'f> {
             self.offset_size,
             self.length_size,
             None, // group B-tree, no ndims
+            &[],
+            None,
         )?;
 
         let mut children = Vec::new();
@@ -350,6 +366,8 @@ impl<'f> Group<'f> {
             &btree_header,
             self.offset_size,
             self.length_size,
+            None,
+            &[],
             None,
         )?;
 
@@ -407,7 +425,7 @@ impl<'f> Group<'f> {
     /// A dataset has a dataspace + datatype + layout.
     fn is_group_at(&self, address: u64) -> Result<bool> {
         let mut header = (*self.cached_header(address)?).clone();
-        header.resolve_shared_messages(self.file_data, self.offset_size, self.length_size);
+        header.resolve_shared_messages(self.file_data, self.offset_size, self.length_size)?;
         for msg in &header.messages {
             match msg {
                 // Group indicators
@@ -425,14 +443,18 @@ impl<'f> Group<'f> {
     }
 
     fn try_open_child_dataset(&self, child: &ChildEntry) -> Option<Dataset<'f>> {
-        Dataset::from_object_header(
-            self.file_data,
+        let header = self.cached_header(child.address).ok()?;
+        Dataset::from_parsed_header(
+            crate::dataset::DatasetParseContext {
+                file_data: self.file_data,
+                offset_size: self.offset_size,
+                length_size: self.length_size,
+                chunk_cache: self.chunk_cache.clone(),
+                filter_registry: self.filter_registry.clone(),
+            },
             child.address,
             child.name.clone(),
-            self.offset_size,
-            self.length_size,
-            self.chunk_cache.clone(),
-            self.filter_registry.clone(),
+            header.as_ref(),
         )
         .ok()
     }

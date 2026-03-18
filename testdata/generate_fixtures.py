@@ -236,6 +236,61 @@ def generate_hdf5_fixtures(base_dir):
         data = np.arange(40, dtype=np.float64).reshape(5, 8)
         ds[:] = data
 
+    # ---- 21. climate_4d.h5 ----
+    # Tests: 4D dataset (time x level x lat x lon) with coordinate variables,
+    # chunked + deflate. Critical for climate/netcdf-rust integration testing.
+    path = os.path.join(hdf5_dir, "climate_4d.h5")
+    print(f"  Generating {path}")
+    with h5py.File(path, "w") as f:
+        ntime, nlevel, nlat, nlon = 4, 3, 6, 12
+        # Coordinate variables
+        time_ds = f.create_dataset("time", data=np.arange(ntime, dtype=np.float64))
+        time_ds.attrs["units"] = "hours since 2000-01-01"
+        time_ds.attrs["calendar"] = "standard"
+
+        level_ds = f.create_dataset("level", data=np.array([1000, 850, 500], dtype=np.float64))
+        level_ds.attrs["units"] = "hPa"
+        level_ds.attrs["positive"] = "down"
+
+        lat_vals = np.linspace(-75.0, 75.0, nlat, dtype=np.float64)
+        lat_ds = f.create_dataset("lat", data=lat_vals)
+        lat_ds.attrs["units"] = "degrees_north"
+
+        lon_vals = np.linspace(0.0, 330.0, nlon, dtype=np.float64)
+        lon_ds = f.create_dataset("lon", data=lon_vals)
+        lon_ds.attrs["units"] = "degrees_east"
+
+        # Main 4D variable with chunked + deflate compression
+        np.random.seed(100)
+        temp_data = (280.0 + 20.0 * np.random.rand(ntime, nlevel, nlat, nlon)).astype(np.float32)
+        temp = f.create_dataset(
+            "temperature", data=temp_data,
+            chunks=(1, 1, nlat, nlon), compression="gzip", compression_opts=4,
+        )
+        temp.attrs["units"] = "K"
+        temp.attrs["long_name"] = "air temperature"
+
+        f.attrs["Conventions"] = "CF-1.8"
+        f.attrs["title"] = "4D climate test fixture"
+
+    # ---- 22. big_endian.h5 ----
+    # Tests: big-endian (BE) floating-point and integer data in HDF5.
+    path = os.path.join(hdf5_dir, "big_endian.h5")
+    print(f"  Generating {path}")
+    with h5py.File(path, "w") as f:
+        be_f32 = np.dtype(">f4")
+        be_f64 = np.dtype(">f8")
+        be_i32 = np.dtype(">i4")
+
+        data_f32 = np.arange(20, dtype=np.float32).reshape(4, 5)
+        f.create_dataset("float32_be", data=data_f32, dtype=be_f32)
+
+        data_f64 = np.arange(12, dtype=np.float64).reshape(3, 4)
+        f.create_dataset("float64_be", data=data_f64, dtype=be_f64)
+
+        data_i32 = np.arange(15, dtype=np.int32).reshape(3, 5)
+        f.create_dataset("int32_be", data=data_i32, dtype=be_i32)
+
 
 def generate_netcdf3_fixtures(base_dir):
     """Generate all NetCDF-3 (classic, 64-bit offset, 64-bit data) test fixtures."""
@@ -339,6 +394,127 @@ def generate_netcdf3_fixtures(base_dir):
     dummy[:] = np.array([0], dtype=np.int32)
     ds.close()
 
+    # ---- 7. climate_4d.nc ----
+    # Tests: 4D dataset (time x level x lat x lon) in CDF-1 classic format
+    # with coordinate variables. CDF-1 does not support chunking/compression,
+    # so data is contiguous. Critical for climate/netcdf-rust integration testing.
+    path = os.path.join(nc3_dir, "climate_4d.nc")
+    print(f"  Generating {path}")
+    ds = netCDF4.Dataset(path, "w", format="NETCDF3_CLASSIC")
+    ds.Conventions = "CF-1.8"
+    ds.title = "4D climate test fixture (CDF-1)"
+
+    ntime, nlevel, nlat, nlon = 4, 3, 6, 12
+    ds.createDimension("time", ntime)
+    ds.createDimension("level", nlevel)
+    ds.createDimension("lat", nlat)
+    ds.createDimension("lon", nlon)
+
+    time_var = ds.createVariable("time", "f8", ("time",))
+    time_var.units = "hours since 2000-01-01"
+    time_var.calendar = "standard"
+    time_var[:] = np.arange(ntime, dtype=np.float64)
+
+    level_var = ds.createVariable("level", "f8", ("level",))
+    level_var.units = "hPa"
+    level_var.positive = "down"
+    level_var[:] = np.array([1000, 850, 500], dtype=np.float64)
+
+    lat_var = ds.createVariable("lat", "f8", ("lat",))
+    lat_var.units = "degrees_north"
+    lat_var[:] = np.linspace(-75.0, 75.0, nlat, dtype=np.float64)
+
+    lon_var = ds.createVariable("lon", "f8", ("lon",))
+    lon_var.units = "degrees_east"
+    lon_var[:] = np.linspace(0.0, 330.0, nlon, dtype=np.float64)
+
+    np.random.seed(100)
+    temp = ds.createVariable("temperature", "f4", ("time", "level", "lat", "lon"))
+    temp.units = "K"
+    temp.long_name = "air temperature"
+    temp[:] = (280.0 + 20.0 * np.random.rand(ntime, nlevel, nlat, nlon)).astype(np.float32)
+    ds.close()
+
+    # ---- 8. packed_cf.nc ----
+    # Tests: CF-convention packed integer data with scale_factor, add_offset,
+    # and _FillValue. Typical for temperature stored as i16.
+    path = os.path.join(nc3_dir, "packed_cf.nc")
+    print(f"  Generating {path}")
+    ds = netCDF4.Dataset(path, "w", format="NETCDF3_CLASSIC")
+    ds.Conventions = "CF-1.8"
+    ds.createDimension("x", 10)
+    ds.createDimension("y", 10)
+
+    temp = ds.createVariable("temperature", "i2", ("x", "y"), fill_value=np.int16(-9999))
+    temp.scale_factor = np.float64(0.01)
+    temp.add_offset = np.float64(273.15)
+    temp.units = "K"
+    temp.long_name = "temperature"
+    # Disable auto-scaling so we write raw packed integers directly
+    temp.set_auto_maskandscale(False)
+    # Unpacked values: 273.15 + raw * 0.01
+    # Raw range: 0..99 -> unpacked: 273.15..274.14
+    raw_data = np.arange(100, dtype=np.int16).reshape(10, 10)
+    # Set a few fill values to test masking
+    raw_data[0, 0] = -9999
+    raw_data[5, 5] = -9999
+    raw_data[9, 9] = -9999
+    temp[:] = raw_data
+    ds.close()
+
+    # ---- 9. shared_dims.nc ----
+    # Tests: multiple variables (temperature, humidity, pressure) sharing
+    # lat/lon dimensions with proper CF metadata.
+    path = os.path.join(nc3_dir, "shared_dims.nc")
+    print(f"  Generating {path}")
+    ds = netCDF4.Dataset(path, "w", format="NETCDF3_CLASSIC")
+    ds.Conventions = "CF-1.8"
+    ds.title = "Multi-variable shared dimensions test"
+
+    nlat, nlon = 8, 16
+    ds.createDimension("lat", nlat)
+    ds.createDimension("lon", nlon)
+
+    lat_var = ds.createVariable("lat", "f8", ("lat",))
+    lat_var.units = "degrees_north"
+    lat_var.long_name = "latitude"
+    lat_var[:] = np.linspace(-87.5, 87.5, nlat, dtype=np.float64)
+
+    lon_var = ds.createVariable("lon", "f8", ("lon",))
+    lon_var.units = "degrees_east"
+    lon_var.long_name = "longitude"
+    lon_var[:] = np.linspace(0.0, 337.5, nlon, dtype=np.float64)
+
+    np.random.seed(200)
+    temp = ds.createVariable("temperature", "f4", ("lat", "lon"))
+    temp.units = "K"
+    temp.long_name = "air temperature"
+    temp[:] = (280.0 + 20.0 * np.random.rand(nlat, nlon)).astype(np.float32)
+
+    humidity = ds.createVariable("humidity", "f4", ("lat", "lon"))
+    humidity.units = "percent"
+    humidity.long_name = "relative humidity"
+    humidity[:] = (50.0 + 40.0 * np.random.rand(nlat, nlon)).astype(np.float32)
+
+    pressure = ds.createVariable("pressure", "f4", ("lat", "lon"))
+    pressure.units = "Pa"
+    pressure.long_name = "surface pressure"
+    pressure[:] = (101000.0 + 2000.0 * np.random.rand(nlat, nlon)).astype(np.float32)
+    ds.close()
+
+    # ---- 10. zero_record.nc ----
+    # Tests: unlimited dimension with zero records written. Edge case that
+    # exercises empty record handling.
+    path = os.path.join(nc3_dir, "zero_record.nc")
+    print(f"  Generating {path}")
+    ds = netCDF4.Dataset(path, "w", format="NETCDF3_CLASSIC")
+    ds.createDimension("time", None)  # unlimited, 0 records
+    ds.createDimension("x", 5)
+    series = ds.createVariable("series", "f4", ("time", "x"))
+    series.units = "m/s"
+    # Intentionally write zero records
+    ds.close()
+
 
 def generate_netcdf4_fixtures(base_dir):
     """Generate all NetCDF-4 (HDF5-backed) test fixtures."""
@@ -438,6 +614,139 @@ def generate_netcdf4_fixtures(base_dir):
     ds.createDimension("lon", 10)
     temp = ds.createVariable("temperature", "f4", ("lat", "lon"))
     temp[:] = np.arange(100, dtype=np.float32).reshape(10, 10)
+    ds.close()
+
+    # ---- 8. nc4_climate_4d.nc ----
+    # Tests: 4D dataset (time x level x lat x lon) in NetCDF-4/HDF5 format
+    # with coordinate variables, chunked + zlib compression.
+    # Critical for climate/netcdf-rust integration testing.
+    path = os.path.join(nc4_dir, "nc4_climate_4d.nc")
+    print(f"  Generating {path}")
+    ds = netCDF4.Dataset(path, "w", format="NETCDF4")
+    ds.Conventions = "CF-1.8"
+    ds.title = "4D climate test fixture (NC4)"
+
+    ntime, nlevel, nlat, nlon = 4, 3, 6, 12
+    ds.createDimension("time", ntime)
+    ds.createDimension("level", nlevel)
+    ds.createDimension("lat", nlat)
+    ds.createDimension("lon", nlon)
+
+    time_var = ds.createVariable("time", "f8", ("time",))
+    time_var.units = "hours since 2000-01-01"
+    time_var.calendar = "standard"
+    time_var[:] = np.arange(ntime, dtype=np.float64)
+
+    level_var = ds.createVariable("level", "f8", ("level",))
+    level_var.units = "hPa"
+    level_var.positive = "down"
+    level_var[:] = np.array([1000, 850, 500], dtype=np.float64)
+
+    lat_var = ds.createVariable("lat", "f8", ("lat",))
+    lat_var.units = "degrees_north"
+    lat_var[:] = np.linspace(-75.0, 75.0, nlat, dtype=np.float64)
+
+    lon_var = ds.createVariable("lon", "f8", ("lon",))
+    lon_var.units = "degrees_east"
+    lon_var[:] = np.linspace(0.0, 330.0, nlon, dtype=np.float64)
+
+    np.random.seed(100)
+    temp = ds.createVariable(
+        "temperature", "f4", ("time", "level", "lat", "lon"),
+        chunksizes=(1, 1, nlat, nlon), zlib=True, complevel=4,
+    )
+    temp.units = "K"
+    temp.long_name = "air temperature"
+    temp[:] = (280.0 + 20.0 * np.random.rand(ntime, nlevel, nlat, nlon)).astype(np.float32)
+    ds.close()
+
+    # ---- 9. nc4_packed_cf.nc ----
+    # Tests: CF-convention packed integer data with scale_factor, add_offset,
+    # and _FillValue in NetCDF-4 format. Typical for temperature stored as i16.
+    path = os.path.join(nc4_dir, "nc4_packed_cf.nc")
+    print(f"  Generating {path}")
+    ds = netCDF4.Dataset(path, "w", format="NETCDF4")
+    ds.Conventions = "CF-1.8"
+    ds.createDimension("x", 10)
+    ds.createDimension("y", 10)
+
+    temp = ds.createVariable("temperature", "i2", ("x", "y"), fill_value=np.int16(-9999))
+    temp.scale_factor = np.float64(0.01)
+    temp.add_offset = np.float64(273.15)
+    temp.units = "K"
+    temp.long_name = "temperature"
+    # Disable auto-scaling so we write raw packed integers directly
+    temp.set_auto_maskandscale(False)
+    # Unpacked values: 273.15 + raw * 0.01
+    # Raw range: 0..99 -> unpacked: 273.15..274.14
+    raw_data = np.arange(100, dtype=np.int16).reshape(10, 10)
+    # Set a few fill values to test masking
+    raw_data[0, 0] = -9999
+    raw_data[5, 5] = -9999
+    raw_data[9, 9] = -9999
+    temp[:] = raw_data
+    ds.close()
+
+    # ---- 10. nc4_shared_dims.nc ----
+    # Tests: multiple variables (temperature, humidity, pressure) sharing
+    # lat/lon dimensions with proper CF metadata in NetCDF-4 format.
+    path = os.path.join(nc4_dir, "nc4_shared_dims.nc")
+    print(f"  Generating {path}")
+    ds = netCDF4.Dataset(path, "w", format="NETCDF4")
+    ds.Conventions = "CF-1.8"
+    ds.title = "Multi-variable shared dimensions test (NC4)"
+
+    nlat, nlon = 8, 16
+    ds.createDimension("lat", nlat)
+    ds.createDimension("lon", nlon)
+
+    lat_var = ds.createVariable("lat", "f8", ("lat",))
+    lat_var.units = "degrees_north"
+    lat_var.long_name = "latitude"
+    lat_var[:] = np.linspace(-87.5, 87.5, nlat, dtype=np.float64)
+
+    lon_var = ds.createVariable("lon", "f8", ("lon",))
+    lon_var.units = "degrees_east"
+    lon_var.long_name = "longitude"
+    lon_var[:] = np.linspace(0.0, 337.5, nlon, dtype=np.float64)
+
+    np.random.seed(200)
+    temp = ds.createVariable(
+        "temperature", "f4", ("lat", "lon"),
+        chunksizes=(4, 8), zlib=True, complevel=4,
+    )
+    temp.units = "K"
+    temp.long_name = "air temperature"
+    temp[:] = (280.0 + 20.0 * np.random.rand(nlat, nlon)).astype(np.float32)
+
+    humidity = ds.createVariable(
+        "humidity", "f4", ("lat", "lon"),
+        chunksizes=(4, 8), zlib=True, complevel=4,
+    )
+    humidity.units = "percent"
+    humidity.long_name = "relative humidity"
+    humidity[:] = (50.0 + 40.0 * np.random.rand(nlat, nlon)).astype(np.float32)
+
+    pressure = ds.createVariable(
+        "pressure", "f4", ("lat", "lon"),
+        chunksizes=(4, 8), zlib=True, complevel=4,
+    )
+    pressure.units = "Pa"
+    pressure.long_name = "surface pressure"
+    pressure[:] = (101000.0 + 2000.0 * np.random.rand(nlat, nlon)).astype(np.float32)
+    ds.close()
+
+    # ---- 11. nc4_zero_record.nc ----
+    # Tests: unlimited dimension with zero records written in NetCDF-4 format.
+    # Edge case that exercises empty record handling in HDF5-backed storage.
+    path = os.path.join(nc4_dir, "nc4_zero_record.nc")
+    print(f"  Generating {path}")
+    ds = netCDF4.Dataset(path, "w", format="NETCDF4")
+    ds.createDimension("time", None)  # unlimited, 0 records
+    ds.createDimension("x", 5)
+    series = ds.createVariable("series", "f4", ("time", "x"), chunksizes=(1, 5))
+    series.units = "m/s"
+    # Intentionally write zero records
     ds.close()
 
 

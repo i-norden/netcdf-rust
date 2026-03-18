@@ -173,50 +173,86 @@ pub fn collect_btree_v1_leaves(
     offset_size: u8,
     length_size: u8,
     ndims: Option<u32>,
+    chunk_dims: &[u32],
+    chunk_bounds: Option<(&[u64], &[u64])>,
 ) -> Result<Vec<(BTreeV1Key, u64)>> {
     let mut results = Vec::new();
     collect_recursive(
-        data,
+        BTreeV1CollectContext {
+            data,
+            offset_size,
+            length_size,
+            ndims,
+            chunk_dims,
+            chunk_bounds,
+        },
         root_address,
-        offset_size,
-        length_size,
-        ndims,
         &mut results,
     )?;
     Ok(results)
 }
 
-/// Recursive helper for tree traversal.
-fn collect_recursive(
-    data: &[u8],
-    address: u64,
+#[derive(Clone, Copy)]
+struct BTreeV1CollectContext<'a> {
+    data: &'a [u8],
     offset_size: u8,
     length_size: u8,
     ndims: Option<u32>,
+    chunk_dims: &'a [u32],
+    chunk_bounds: Option<(&'a [u64], &'a [u64])>,
+}
+
+/// Recursive helper for tree traversal.
+fn collect_recursive(
+    context: BTreeV1CollectContext<'_>,
+    address: u64,
     results: &mut Vec<(BTreeV1Key, u64)>,
 ) -> Result<()> {
-    if Cursor::is_undefined_offset(address, offset_size) {
+    if Cursor::is_undefined_offset(address, context.offset_size) {
         return Ok(());
     }
 
-    if address as usize >= data.len() {
+    if address as usize >= context.data.len() {
         return Err(Error::OffsetOutOfBounds(address));
     }
 
-    let mut cursor = Cursor::new(data);
+    let mut cursor = Cursor::new(context.data);
     cursor.set_position(address);
 
-    let node = BTreeV1Node::parse(&mut cursor, offset_size, length_size, ndims)?;
+    let node = BTreeV1Node::parse(
+        &mut cursor,
+        context.offset_size,
+        context.length_size,
+        context.ndims,
+    )?;
 
     if node.level == 0 {
         // Leaf node — collect (key[i], child[i]) pairs.
         for (i, child_addr) in node.children.iter().enumerate() {
-            results.push((node.keys[i].clone(), *child_addr));
+            let include = match &node.keys[i] {
+                BTreeV1Key::RawData { offsets, .. } => {
+                    context.chunk_bounds.map_or(true, |(first, last)| {
+                        offsets
+                            .iter()
+                            .zip(context.chunk_dims.iter())
+                            .enumerate()
+                            .all(|(dim, (offset, chunk_dim))| {
+                                let chunk_index = *offset / u64::from(*chunk_dim);
+                                chunk_index >= first[dim] && chunk_index <= last[dim]
+                            })
+                    })
+                }
+                _ => true,
+            };
+
+            if include {
+                results.push((node.keys[i].clone(), *child_addr));
+            }
         }
     } else {
         // Internal node — recurse into each child.
         for child_addr in &node.children {
-            collect_recursive(data, *child_addr, offset_size, length_size, ndims, results)?;
+            collect_recursive(context, *child_addr, results)?;
         }
     }
 
@@ -228,6 +264,7 @@ mod tests {
     use super::*;
 
     /// Build a v1 B-tree node (type 0, group) from the given parameters.
+    #[allow(clippy::too_many_arguments)]
     fn build_group_node(
         level: u8,
         entries_used: u16,
@@ -440,7 +477,7 @@ mod tests {
         // Put the leaf node at offset 0 in our fake file data.
         let node_data = build_group_node(0, 2, undef8, undef8, &[0, 5, 10], &[0x100, 0x200], 8, 8);
 
-        let results = collect_btree_v1_leaves(&node_data, 0, 8, 8, None).unwrap();
+        let results = collect_btree_v1_leaves(&node_data, 0, 8, 8, None, &[], None).unwrap();
 
         assert_eq!(results.len(), 2);
         match &results[0].0 {
@@ -482,7 +519,7 @@ mod tests {
         file_data[1000..1000 + leaf_a.len()].copy_from_slice(&leaf_a);
         file_data[2000..2000 + leaf_b.len()].copy_from_slice(&leaf_b);
 
-        let results = collect_btree_v1_leaves(&file_data, 0, 8, 8, None).unwrap();
+        let results = collect_btree_v1_leaves(&file_data, 0, 8, 8, None, &[], None).unwrap();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].1, 0xA00);
@@ -493,7 +530,7 @@ mod tests {
     fn test_collect_undefined_root() {
         // Undefined root address should produce empty results.
         let data = vec![0u8; 100];
-        let results = collect_btree_v1_leaves(&data, u64::MAX, 8, 8, None).unwrap();
+        let results = collect_btree_v1_leaves(&data, u64::MAX, 8, 8, None, &[], None).unwrap();
         assert!(results.is_empty());
     }
 }
