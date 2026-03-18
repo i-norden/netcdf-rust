@@ -137,6 +137,11 @@ python testdata/generate_fixtures.py
 cargo test
 ```
 
+## Releasing
+
+See [RELEASING.md](RELEASING.md) for the release checklist and the required
+publish order for `hdf5-reader` and `netcdf-reader`.
+
 ## Benchmarks
 
 `netcdf-reader` includes a Criterion benchmark that compares this implementation
