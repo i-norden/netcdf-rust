@@ -49,6 +49,7 @@ use superblock::Superblock;
 
 // Re-exports
 pub use attribute_api::Attribute;
+use dataset::DatasetTemplate;
 pub use dataset::{Dataset, SliceInfo, SliceInfoElem};
 pub use datatype_api::{
     dtype_element_size, CompoundField, EnumMember, H5Type, ReferenceType, StringEncoding,
@@ -94,6 +95,8 @@ pub struct Hdf5File {
     chunk_cache: Arc<ChunkCache>,
     /// Object header cache — avoids re-parsing the same header.
     header_cache: HeaderCache,
+    /// Dataset path cache — avoids repeated path traversal and metadata rebuilds.
+    dataset_path_cache: Arc<parking_lot::Mutex<HashMap<String, Arc<DatasetTemplate>>>>,
     /// Filter registry for decompression — users can register custom filters.
     filter_registry: Arc<FilterRegistry>,
 }
@@ -141,6 +144,7 @@ impl Hdf5File {
             superblock,
             chunk_cache: cache,
             header_cache: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            dataset_path_cache: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             filter_registry: Arc::new(registry),
         })
     }
@@ -162,6 +166,7 @@ impl Hdf5File {
             superblock,
             chunk_cache: Arc::new(ChunkCache::default()),
             header_cache: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            dataset_path_cache: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             filter_registry: Arc::new(FilterRegistry::default()),
         })
     }
@@ -182,9 +187,14 @@ impl Hdf5File {
             }
         }
         let data = self.data.as_slice();
-        let hdr = ObjectHeader::parse_at(
+        let mut hdr = ObjectHeader::parse_at(
             data,
             addr,
+            self.superblock.offset_size,
+            self.superblock.length_size,
+        )?;
+        hdr.resolve_shared_messages(
+            data,
             self.superblock.offset_size,
             self.superblock.length_size,
         )?;
@@ -219,9 +229,26 @@ impl Hdf5File {
             .split('/')
             .filter(|s| !s.is_empty())
             .collect();
+        let normalized_path = format!("/{}", parts.join("/"));
 
         if parts.is_empty() {
             return Err(Error::DatasetNotFound(path.to_string()).with_context(path));
+        }
+
+        if let Some(template) = self
+            .dataset_path_cache
+            .lock()
+            .get(&normalized_path)
+            .cloned()
+        {
+            return Ok(Dataset::from_template(
+                self.data.as_slice(),
+                self.superblock.offset_size,
+                self.superblock.length_size,
+                template,
+                self.chunk_cache.clone(),
+                self.filter_registry.clone(),
+            ));
         }
 
         let mut group = self.root_group()?;
@@ -229,9 +256,13 @@ impl Hdf5File {
             group = group.group(part).map_err(|e| e.with_context(path))?;
         }
 
-        group
+        let dataset = group
             .dataset(parts[parts.len() - 1])
-            .map_err(|e| e.with_context(path))
+            .map_err(|e| e.with_context(path))?;
+        self.dataset_path_cache
+            .lock()
+            .insert(normalized_path, dataset.template());
+        Ok(dataset)
     }
 
     /// Convenience: get a group at a path like "/group1/subgroup".

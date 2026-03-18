@@ -1,6 +1,6 @@
 use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use lru::LruCache;
 use ndarray::{ArrayD, IxDyn};
@@ -25,6 +25,8 @@ use crate::messages::layout::{ChunkIndexing, DataLayout};
 use crate::messages::HdfMessage;
 use crate::object_header::ObjectHeader;
 
+const HOT_FULL_DATASET_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
 #[cfg(feature = "rayon")]
 #[derive(Clone, Copy)]
 struct FlatBufferPtr {
@@ -46,15 +48,19 @@ impl FlatBufferPtr {
         chunk_offsets: &[u64],
         chunk_shape: &[u64],
         dataset_shape: &[u64],
+        dataset_strides: &[usize],
+        chunk_strides: &[usize],
         elem_size: usize,
     ) {
-        copy_chunk_to_flat_ptr(
+        copy_chunk_to_flat_with_strides_ptr(
             chunk_data,
             self.ptr,
             self.len,
             chunk_offsets,
             chunk_shape,
             dataset_shape,
+            dataset_strides,
+            chunk_strides,
             elem_size,
         );
     }
@@ -206,6 +212,29 @@ fn expected_chunk_count(first_chunk: &[u64], last_chunk: &[u64]) -> Result<usize
     Ok(total)
 }
 
+fn full_dataset_chunk_count(shape: &[u64], chunk_shape: &[u64]) -> Result<usize> {
+    let mut total = 1usize;
+    for (&dim, &chunk) in shape.iter().zip(chunk_shape.iter()) {
+        let chunk_count = checked_usize(dim.div_ceil(chunk), "full dataset chunk count")?;
+        total = checked_mul_usize(total, chunk_count, "full dataset chunk count")?;
+    }
+    Ok(total)
+}
+
+fn row_major_strides(shape: &[u64], context: &str) -> Result<Vec<usize>> {
+    let ndim = shape.len();
+    if ndim == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut strides = vec![1usize; ndim];
+    for i in (0..ndim - 1).rev() {
+        let next_extent = checked_usize(shape[i + 1], context)?;
+        strides[i] = checked_mul_usize(strides[i + 1], next_extent, context)?;
+    }
+    Ok(strides)
+}
+
 fn assume_init_u8_vec(mut buffer: Vec<MaybeUninit<u8>>) -> Vec<u8> {
     let ptr = buffer.as_mut_ptr() as *mut u8;
     let len = buffer.len();
@@ -312,23 +341,80 @@ pub struct Dataset<'f> {
     pub(crate) attributes: Vec<AttributeMessage>,
     pub(crate) chunk_cache: Arc<ChunkCache>,
     chunk_entry_cache: Arc<Mutex<LruCache<ChunkEntryCacheKey, Arc<Vec<chunk_index::ChunkEntry>>>>>,
+    full_chunk_entries: Arc<OnceLock<Arc<Vec<chunk_index::ChunkEntry>>>>,
+    full_dataset_bytes: Arc<OnceLock<Arc<Vec<u8>>>>,
     pub(crate) filter_registry: Arc<FilterRegistry>,
 }
 
+pub(crate) struct DatasetTemplate {
+    name: String,
+    data_address: u64,
+    dataspace: DataspaceMessage,
+    datatype: Datatype,
+    layout: DataLayout,
+    fill_value: Option<FillValueMessage>,
+    filters: Option<FilterPipelineMessage>,
+    attributes: Vec<AttributeMessage>,
+    chunk_entry_cache: Arc<Mutex<LruCache<ChunkEntryCacheKey, Arc<Vec<chunk_index::ChunkEntry>>>>>,
+    full_chunk_entries: Arc<OnceLock<Arc<Vec<chunk_index::ChunkEntry>>>>,
+    full_dataset_bytes: Arc<OnceLock<Arc<Vec<u8>>>>,
+}
+
 impl<'f> Dataset<'f> {
-    /// Parse a dataset from an object header at the given address.
-    pub(crate) fn from_object_header(
+    pub(crate) fn from_template(
+        file_data: &'f [u8],
+        offset_size: u8,
+        length_size: u8,
+        template: Arc<DatasetTemplate>,
+        chunk_cache: Arc<ChunkCache>,
+        filter_registry: Arc<FilterRegistry>,
+    ) -> Self {
+        Dataset {
+            file_data,
+            offset_size,
+            length_size,
+            name: template.name.clone(),
+            data_address: template.data_address,
+            dataspace: template.dataspace.clone(),
+            datatype: template.datatype.clone(),
+            layout: template.layout.clone(),
+            fill_value: template.fill_value.clone(),
+            filters: template.filters.clone(),
+            attributes: template.attributes.clone(),
+            chunk_cache,
+            chunk_entry_cache: template.chunk_entry_cache.clone(),
+            full_chunk_entries: template.full_chunk_entries.clone(),
+            full_dataset_bytes: template.full_dataset_bytes.clone(),
+            filter_registry,
+        }
+    }
+
+    pub(crate) fn template(&self) -> Arc<DatasetTemplate> {
+        Arc::new(DatasetTemplate {
+            name: self.name.clone(),
+            data_address: self.data_address,
+            dataspace: self.dataspace.clone(),
+            datatype: self.datatype.clone(),
+            layout: self.layout.clone(),
+            fill_value: self.fill_value.clone(),
+            filters: self.filters.clone(),
+            attributes: self.attributes.clone(),
+            chunk_entry_cache: self.chunk_entry_cache.clone(),
+            full_chunk_entries: self.full_chunk_entries.clone(),
+            full_dataset_bytes: self.full_dataset_bytes.clone(),
+        })
+    }
+
+    pub(crate) fn from_parsed_header(
         file_data: &'f [u8],
         address: u64,
         name: String,
         offset_size: u8,
         length_size: u8,
+        header: &ObjectHeader,
         chunk_cache: Arc<ChunkCache>,
         filter_registry: Arc<FilterRegistry>,
     ) -> Result<Self> {
-        let mut header = ObjectHeader::parse_at(file_data, address, offset_size, length_size)?;
-        header.resolve_shared_messages(file_data, offset_size, length_size)?;
-
         let mut dataspace: Option<DataspaceMessage> = None;
         let mut datatype: Option<Datatype> = None;
         let mut layout: Option<DataLayout> = None;
@@ -336,13 +422,13 @@ impl<'f> Dataset<'f> {
         let mut filter_pipeline: Option<FilterPipelineMessage> = None;
         let attributes = collect_attribute_messages(&header, file_data, offset_size, length_size)?;
 
-        for msg in header.messages {
+        for msg in &header.messages {
             match msg {
-                HdfMessage::Dataspace(ds) => dataspace = Some(ds),
-                HdfMessage::Datatype(dt) => datatype = Some(dt.datatype),
-                HdfMessage::DataLayout(dl) => layout = Some(dl.layout),
-                HdfMessage::FillValue(fv) => fill_value = Some(fv),
-                HdfMessage::FilterPipeline(fp) => filter_pipeline = Some(fp),
+                HdfMessage::Dataspace(ds) => dataspace = Some(ds.clone()),
+                HdfMessage::Datatype(dt) => datatype = Some(dt.datatype.clone()),
+                HdfMessage::DataLayout(dl) => layout = Some(dl.layout.clone()),
+                HdfMessage::FillValue(fv) => fill_value = Some(fv.clone()),
+                HdfMessage::FilterPipeline(fp) => filter_pipeline = Some(fp.clone()),
                 _ => {}
             }
         }
@@ -380,6 +466,8 @@ impl<'f> Dataset<'f> {
             attributes,
             chunk_cache,
             chunk_entry_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(32).unwrap()))),
+            full_chunk_entries: Arc::new(OnceLock::new()),
+            full_dataset_bytes: Arc::new(OnceLock::new()),
             filter_registry,
         })
     }
@@ -615,11 +703,12 @@ impl<'f> Dataset<'f> {
         let shape = &self.dataspace.dims;
         let elem_size = dtype_element_size(&self.datatype);
         let chunk_shape: Vec<u64> = chunk_dims.iter().map(|&d| d as u64).collect();
+        let dataset_strides = row_major_strides(shape, "dataset stride")?;
+        let chunk_strides = row_major_strides(&chunk_shape, "chunk stride")?;
 
         // Allocate output initialized from the dataset's fill value.
-        let total_elements = self.num_elements() as usize;
-        let total_bytes = total_elements * elem_size;
-        let mut flat_data = self.make_output_buffer(total_bytes);
+        let total_elements = checked_usize(self.num_elements(), "dataset element count")?;
+        let total_bytes = checked_mul_usize(total_elements, elem_size, "dataset size in bytes")?;
 
         let entries = self.collect_chunk_entries(
             index_address,
@@ -631,14 +720,107 @@ impl<'f> Dataset<'f> {
             None,
         )?;
 
+        let full_chunk_coverage = entries.len() == full_dataset_chunk_count(shape, &chunk_shape)?;
+        if full_chunk_coverage {
+            let hot_full_dataset_bytes = if total_bytes <= HOT_FULL_DATASET_CACHE_MAX_BYTES {
+                self.full_dataset_bytes.get().cloned()
+            } else {
+                None
+            };
+            if let Some(cached_bytes) = hot_full_dataset_bytes {
+                return self.decode_raw_data::<T>(&cached_bytes);
+            }
+            if T::native_copy_compatible(&self.datatype) && std::mem::size_of::<T>() == elem_size {
+                let mut result_values: Vec<MaybeUninit<T>> =
+                    std::iter::repeat_with(MaybeUninit::<T>::uninit)
+                        .take(total_elements)
+                        .collect();
+                let result_ptr = result_values.as_mut_ptr() as *mut u8;
+                let result_len = checked_mul_usize(
+                    result_values.len(),
+                    std::mem::size_of::<T>(),
+                    "typed dataset size in bytes",
+                )?;
+
+                for entry in &entries {
+                    let chunk_data =
+                        self.load_chunk_data(entry, index_address, &chunk_shape, elem_size)?;
+                    unsafe {
+                        copy_chunk_to_flat_with_strides_ptr(
+                            &chunk_data,
+                            result_ptr,
+                            result_len,
+                            &entry.offsets,
+                            &chunk_shape,
+                            shape,
+                            &dataset_strides,
+                            &chunk_strides,
+                            elem_size,
+                        );
+                    }
+                }
+
+                if total_bytes <= HOT_FULL_DATASET_CACHE_MAX_BYTES {
+                    let mut cached_bytes = vec![0u8; total_bytes];
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            result_ptr,
+                            cached_bytes.as_mut_ptr(),
+                            total_bytes,
+                        );
+                    }
+                    let _ = self.full_dataset_bytes.set(Arc::new(cached_bytes));
+                }
+
+                let mut result_shape = Vec::with_capacity(shape.len());
+                for &dim in shape {
+                    result_shape.push(checked_usize(dim, "dataset dimension")?);
+                }
+                let result_values = assume_init_vec(result_values);
+                return ArrayD::from_shape_vec(IxDyn(&result_shape), result_values)
+                    .map_err(|e| Error::InvalidData(format!("array shape error: {e}")));
+            }
+
+            let mut flat_data = vec![MaybeUninit::<u8>::uninit(); total_bytes];
+            let flat_ptr = flat_data.as_mut_ptr() as *mut u8;
+            let flat_len = flat_data.len();
+
+            for entry in &entries {
+                let chunk_data =
+                    self.load_chunk_data(entry, index_address, &chunk_shape, elem_size)?;
+                unsafe {
+                    copy_chunk_to_flat_with_strides_ptr(
+                        &chunk_data,
+                        flat_ptr,
+                        flat_len,
+                        &entry.offsets,
+                        &chunk_shape,
+                        shape,
+                        &dataset_strides,
+                        &chunk_strides,
+                        elem_size,
+                    );
+                }
+            }
+
+            let flat_data = assume_init_u8_vec(flat_data);
+            if total_bytes <= HOT_FULL_DATASET_CACHE_MAX_BYTES {
+                let _ = self.full_dataset_bytes.set(Arc::new(flat_data.clone()));
+            }
+            return self.decode_raw_data::<T>(&flat_data);
+        }
+
+        let mut flat_data = self.make_output_buffer(total_bytes);
         for entry in &entries {
             let chunk_data = self.load_chunk_data(entry, index_address, &chunk_shape, elem_size)?;
-            copy_chunk_to_flat(
+            copy_chunk_to_flat_with_strides(
                 &chunk_data,
                 &mut flat_data,
                 &entry.offsets,
                 &chunk_shape,
                 shape,
+                &dataset_strides,
+                &chunk_strides,
                 elem_size,
             );
         }
@@ -662,9 +844,10 @@ impl<'f> Dataset<'f> {
         let shape = &self.dataspace.dims;
         let elem_size = dtype_element_size(&self.datatype);
         let chunk_shape: Vec<u64> = chunk_dims.iter().map(|&d| d as u64).collect();
-        let total_elements = self.num_elements() as usize;
-        let total_bytes = total_elements * elem_size;
-        let mut flat_data = self.make_output_buffer(total_bytes);
+        let dataset_strides = row_major_strides(shape, "dataset stride")?;
+        let chunk_strides = row_major_strides(&chunk_shape, "chunk stride")?;
+        let total_elements = checked_usize(self.num_elements(), "dataset element count")?;
+        let total_bytes = checked_mul_usize(total_elements, elem_size, "dataset size in bytes")?;
 
         let mut entries = self.collect_chunk_entries(
             index_address,
@@ -691,6 +874,97 @@ impl<'f> Dataset<'f> {
             }
         }
 
+        let full_chunk_coverage = entries.len() == full_dataset_chunk_count(shape, &chunk_shape)?;
+        if full_chunk_coverage {
+            if total_bytes <= HOT_FULL_DATASET_CACHE_MAX_BYTES {
+                if let Some(cached_bytes) = self.full_dataset_bytes.get() {
+                    return self.decode_raw_data::<T>(cached_bytes);
+                }
+            }
+            if T::native_copy_compatible(&self.datatype) && std::mem::size_of::<T>() == elem_size {
+                let mut result_values: Vec<MaybeUninit<T>> =
+                    std::iter::repeat_with(MaybeUninit::<T>::uninit)
+                        .take(total_elements)
+                        .collect();
+                let flat = FlatBufferPtr {
+                    ptr: result_values.as_mut_ptr() as *mut u8,
+                    len: checked_mul_usize(
+                        result_values.len(),
+                        std::mem::size_of::<T>(),
+                        "typed dataset size in bytes",
+                    )?,
+                };
+
+                entries
+                    .par_iter()
+                    .map(|entry| {
+                        self.load_chunk_data(entry, index_address, &chunk_shape, elem_size)
+                            .map(|data| unsafe {
+                                flat.copy_chunk(
+                                    &data,
+                                    &entry.offsets,
+                                    &chunk_shape,
+                                    shape,
+                                    &dataset_strides,
+                                    &chunk_strides,
+                                    elem_size,
+                                );
+                            })
+                    })
+                    .collect::<std::result::Result<Vec<_>, Error>>()?;
+
+                let mut result_shape = Vec::with_capacity(shape.len());
+                for &dim in shape {
+                    result_shape.push(checked_usize(dim, "dataset dimension")?);
+                }
+                if total_bytes <= HOT_FULL_DATASET_CACHE_MAX_BYTES {
+                    let mut cached_bytes = vec![0u8; total_bytes];
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            flat.ptr,
+                            cached_bytes.as_mut_ptr(),
+                            total_bytes,
+                        );
+                    }
+                    let _ = self.full_dataset_bytes.set(Arc::new(cached_bytes));
+                }
+                let result_values = assume_init_vec(result_values);
+                return ArrayD::from_shape_vec(IxDyn(&result_shape), result_values)
+                    .map_err(|e| Error::InvalidData(format!("array shape error: {e}")));
+            }
+
+            let mut flat_data = vec![MaybeUninit::<u8>::uninit(); total_bytes];
+            let flat = FlatBufferPtr {
+                ptr: flat_data.as_mut_ptr() as *mut u8,
+                len: flat_data.len(),
+            };
+
+            entries
+                .par_iter()
+                .map(|entry| {
+                    self.load_chunk_data(entry, index_address, &chunk_shape, elem_size)
+                        .map(|data| unsafe {
+                            flat.copy_chunk(
+                                &data,
+                                &entry.offsets,
+                                &chunk_shape,
+                                shape,
+                                &dataset_strides,
+                                &chunk_strides,
+                                elem_size,
+                            );
+                        })
+                })
+                .collect::<std::result::Result<Vec<_>, Error>>()?;
+
+            let flat_data = assume_init_u8_vec(flat_data);
+            if total_bytes <= HOT_FULL_DATASET_CACHE_MAX_BYTES {
+                let _ = self.full_dataset_bytes.set(Arc::new(flat_data.clone()));
+            }
+            return self.decode_raw_data::<T>(&flat_data);
+        }
+
+        let mut flat_data = self.make_output_buffer(total_bytes);
         let flat = FlatBufferPtr {
             ptr: flat_data.as_mut_ptr(),
             len: flat_data.len(),
@@ -701,7 +975,15 @@ impl<'f> Dataset<'f> {
             .map(|entry| {
                 self.load_chunk_data(entry, index_address, &chunk_shape, elem_size)
                     .map(|data| unsafe {
-                        flat.copy_chunk(&data, &entry.offsets, &chunk_shape, shape, elem_size);
+                        flat.copy_chunk(
+                            &data,
+                            &entry.offsets,
+                            &chunk_shape,
+                            shape,
+                            &dataset_strides,
+                            &chunk_strides,
+                            elem_size,
+                        );
                     })
             })
             .collect::<std::result::Result<Vec<_>, Error>>()?;
@@ -722,6 +1004,12 @@ impl<'f> Dataset<'f> {
         elem_size: usize,
         chunk_bounds: Option<(&[u64], &[u64])>,
     ) -> Result<Vec<chunk_index::ChunkEntry>> {
+        if chunk_bounds.is_none() {
+            if let Some(cached) = self.full_chunk_entries.get() {
+                return Ok((**cached).clone());
+            }
+        }
+
         let cache_key = chunk_bounds.map(|(first_chunk, last_chunk)| ChunkEntryCacheKey {
             index_address,
             first_chunk: SmallVec::from_slice(first_chunk),
@@ -792,6 +1080,8 @@ impl<'f> Dataset<'f> {
         if let Some(key) = cache_key {
             let mut cache = self.chunk_entry_cache.lock();
             cache.put(key, Arc::new(entries.clone()));
+        } else {
+            let _ = self.full_chunk_entries.set(Arc::new(entries.clone()));
         }
 
         Ok(entries)
@@ -1604,6 +1894,7 @@ fn normalize_layout(layout: DataLayout, dataspace: &DataspaceMessage) -> DataLay
     }
 }
 
+#[cfg(test)]
 /// Copy a chunk's data into the flat output buffer at the correct position.
 fn copy_chunk_to_flat(
     chunk_data: &[u8],
@@ -1613,26 +1904,56 @@ fn copy_chunk_to_flat(
     dataset_shape: &[u64],
     elem_size: usize,
 ) {
+    let dataset_strides = row_major_strides(dataset_shape, "dataset stride")
+        .expect("dataset strides should fit in usize");
+    let chunk_strides =
+        row_major_strides(chunk_shape, "chunk stride").expect("chunk strides should fit in usize");
+    copy_chunk_to_flat_with_strides(
+        chunk_data,
+        flat,
+        chunk_offsets,
+        chunk_shape,
+        dataset_shape,
+        &dataset_strides,
+        &chunk_strides,
+        elem_size,
+    );
+}
+
+fn copy_chunk_to_flat_with_strides(
+    chunk_data: &[u8],
+    flat: &mut [u8],
+    chunk_offsets: &[u64],
+    chunk_shape: &[u64],
+    dataset_shape: &[u64],
+    dataset_strides: &[usize],
+    chunk_strides: &[usize],
+    elem_size: usize,
+) {
     unsafe {
-        copy_chunk_to_flat_ptr(
+        copy_chunk_to_flat_with_strides_ptr(
             chunk_data,
             flat.as_mut_ptr(),
             flat.len(),
             chunk_offsets,
             chunk_shape,
             dataset_shape,
+            dataset_strides,
+            chunk_strides,
             elem_size,
         );
     }
 }
 
-unsafe fn copy_chunk_to_flat_ptr(
+unsafe fn copy_chunk_to_flat_with_strides_ptr(
     chunk_data: &[u8],
     flat_ptr: *mut u8,
     flat_len: usize,
     chunk_offsets: &[u64],
     chunk_shape: &[u64],
     dataset_shape: &[u64],
+    dataset_strides: &[usize],
+    chunk_strides: &[usize],
     elem_size: usize,
 ) {
     let ndim = dataset_shape.len();
@@ -1641,18 +1962,6 @@ unsafe fn copy_chunk_to_flat_ptr(
         let bytes = elem_size.min(chunk_data.len()).min(flat_len);
         std::ptr::copy_nonoverlapping(chunk_data.as_ptr(), flat_ptr, bytes);
         return;
-    }
-
-    // Compute strides for the dataset (row-major)
-    let mut dataset_strides = vec![1usize; ndim];
-    for i in (0..ndim - 1).rev() {
-        dataset_strides[i] = dataset_strides[i + 1] * dataset_shape[i + 1] as usize;
-    }
-
-    // Compute strides for the chunk
-    let mut chunk_strides = vec![1usize; ndim];
-    for i in (0..ndim - 1).rev() {
-        chunk_strides[i] = chunk_strides[i + 1] * chunk_shape[i + 1] as usize;
     }
 
     // Total elements in this chunk (clamped to dataset boundaries)

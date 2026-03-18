@@ -153,29 +153,14 @@ impl Nc4File {
     /// matching HDF5 dataset and reads the data.
     pub fn read_variable<T: H5Type>(&self, path: &str) -> Result<ArrayD<T>> {
         let normalized = normalize_dataset_path(path)?;
-        let var = self
-            .root_group
-            .variable(normalized)
-            .ok_or_else(|| Error::VariableNotFound(path.to_string()))?;
         let dataset = self.hdf5.dataset(normalized)?;
-
-        // Verify the shape matches what we expect
-        debug_assert_eq!(dataset.shape(), &var.shape()[..]);
-
         Ok(dataset.read_array::<T>()?)
     }
 
     #[cfg(feature = "rayon")]
     pub fn read_variable_parallel<T: H5Type>(&self, path: &str) -> Result<ArrayD<T>> {
         let normalized = normalize_dataset_path(path)?;
-        let var = self
-            .root_group
-            .variable(normalized)
-            .ok_or_else(|| Error::VariableNotFound(path.to_string()))?;
         let dataset = self.hdf5.dataset(normalized)?;
-
-        debug_assert_eq!(dataset.shape(), &var.shape()[..]);
-
         Ok(dataset.read_array_parallel::<T>()?)
     }
 
@@ -186,14 +171,7 @@ impl Nc4File {
         pool: &ThreadPool,
     ) -> Result<ArrayD<T>> {
         let normalized = normalize_dataset_path(path)?;
-        let var = self
-            .root_group
-            .variable(normalized)
-            .ok_or_else(|| Error::VariableNotFound(path.to_string()))?;
         let dataset = self.hdf5.dataset(normalized)?;
-
-        debug_assert_eq!(dataset.shape(), &var.shape()[..]);
-
         Ok(dataset.read_array_in_pool::<T>(pool)?)
     }
 }
@@ -239,10 +217,6 @@ impl Nc4File {
         selection: &crate::types::NcSliceInfo,
     ) -> Result<ArrayD<T>> {
         let normalized = normalize_dataset_path(path)?;
-        let _var = self
-            .root_group
-            .variable(normalized)
-            .ok_or_else(|| Error::VariableNotFound(path.to_string()))?;
         let dataset = self.hdf5.dataset(normalized)?;
         let hdf5_sel = selection.to_hdf5_slice_info();
         Ok(dataset.read_slice::<T>(&hdf5_sel)?)
@@ -259,10 +233,6 @@ impl Nc4File {
         selection: &crate::types::NcSliceInfo,
     ) -> Result<ArrayD<T>> {
         let normalized = normalize_dataset_path(path)?;
-        let _var = self
-            .root_group
-            .variable(normalized)
-            .ok_or_else(|| Error::VariableNotFound(path.to_string()))?;
         let dataset = self.hdf5.dataset(normalized)?;
         let hdf5_sel = selection.to_hdf5_slice_info();
         Ok(dataset.read_slice_parallel::<T>(&hdf5_sel)?)

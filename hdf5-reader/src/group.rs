@@ -100,7 +100,9 @@ impl<'f> Group<'f> {
                 return Ok(Arc::clone(hdr));
             }
         }
-        let hdr = ObjectHeader::parse_at(self.file_data, addr, self.offset_size, self.length_size)?;
+        let mut hdr =
+            ObjectHeader::parse_at(self.file_data, addr, self.offset_size, self.length_size)?;
+        hdr.resolve_shared_messages(self.file_data, self.offset_size, self.length_size)?;
         let arc = Arc::new(hdr);
         let mut cache = self.header_cache.lock();
         cache.insert(addr, Arc::clone(&arc));
@@ -441,12 +443,14 @@ impl<'f> Group<'f> {
     }
 
     fn try_open_child_dataset(&self, child: &ChildEntry) -> Option<Dataset<'f>> {
-        Dataset::from_object_header(
+        let header = self.cached_header(child.address).ok()?;
+        Dataset::from_parsed_header(
             self.file_data,
             child.address,
             child.name.clone(),
             self.offset_size,
             self.length_size,
+            header.as_ref(),
             self.chunk_cache.clone(),
             self.filter_registry.clone(),
         )

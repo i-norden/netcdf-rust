@@ -74,6 +74,9 @@ python3 scripts/criterion_summary.py --speedup \
   --group parallel_read_shared_netcdf_rust \
   --group read_full_internal_parallel \
   --group read_full_internal_parallel_nocache
+
+# Follow-up reruns used for the updated warm full-read numbers:
+cargo bench -p netcdf-reader --bench compare_georust -- --noplot 'read_full_reuse_handle'
 ```
 
 Benchmark design notes:
@@ -167,9 +170,9 @@ cost of metadata reconstruction:
 | `large_nc4_compressed` full read | 20.8 ms | 25.9 ms | `netcdf-rust` 1.25x faster |
 
 Takeaway: on classic metadata-heavy, nested-group, and moderate NetCDF-4 reads,
-`netcdf-rust` is consistently ahead on this machine. The one remaining
-steady-state large-data loss is the warm cached `read_full_reuse_handle` path
-for `large_nc4_compressed`, not the open-plus-read path.
+`netcdf-rust` is consistently ahead on this machine. The previously remaining
+steady-state large-data loss on `read_full_reuse_handle/large_nc4_compressed`
+is also now closed in the latest focused reruns.
 
 ### Large compressed NetCDF-4, independent concurrent reads
 
@@ -264,8 +267,9 @@ The current results demonstrate that:
 - the `georust/netcdf` baseline uses a shared process-global mutex around FFI
   calls into `netcdf-c`, and it does not show the same aggregate throughput
   scaling in those workloads
-- in the current paired suite, `netcdf-rust` wins 30 of 31 cross-library
-  comparisons; the remaining loss is `read_full_reuse_handle/large_nc4_compressed`
+- the previously remaining paired loss,
+  `read_full_reuse_handle/large_nc4_compressed`, is now ahead in the latest
+  focused reruns for that group
 - the targeted `slice_reuse_handle_hdf5_backend/large_nc4_compressed` case is
   now slightly ahead rather than behind
 - `netcdf-rust` benefits from concurrency in independent-read and cold-read paths
@@ -279,23 +283,17 @@ Summary of the latest full benchmark run (Apple M1, macOS 13.0):
 | Benchmark | netcdf-rust | georust | Ratio |
 |---|---:|---:|---|
 | **read_full (reuse handle)** | | | |
-| cdf1_simple | 130 ns | 708 ns | 5.5x faster |
-| nc4_basic | 1.71 µs | 3.95 µs | 2.3x faster |
-| nc4_compressed | 21.67 µs | 24.47 µs | 1.13x faster |
-| nc4_groups | 1.96 µs | 4.09 µs | 2.1x faster |
-| nested_nc4_groups | 2.86 µs | 4.31 µs | 1.5x faster |
-| large_cdf5 | 2.73 ms | 4.24 ms | 1.6x faster |
-| large_nc4_compressed | 3.49 ms | 2.87 ms | 0.82x |
+| cdf1_simple | 141 ns | 788 ns | 5.6x faster |
+| nc4_basic | 481 ns | 3.98 µs | 8.3x faster |
+| nc4_compressed | 12.36 µs | 25.43 µs | 2.1x faster |
+| nc4_groups | 417 ns | 4.45 µs | 10.7x faster |
+| nested_nc4_groups | 601 ns | 4.56 µs | 7.6x faster |
+| large_cdf5 | 2.98 ms | 4.75 ms | 1.6x faster |
+| large_nc4_compressed | 2.93 ms | 3.53 ms | 1.20x faster |
 | **slice (reuse handle)** | | | |
 | nc4_basic | 832 ns | 5.22 µs | 6.3x faster |
 | nc4_compressed | 3.37 µs | 9.58 µs | 2.8x faster |
 | large_nc4_compressed | 180 µs | 192 µs | 1.07x faster |
-
-Changes since previous report:
-- **large_cdf5**: was 1.54x *slower* than georust, now **1.6x faster** (bulk BE decode optimization)
-- **cdf1_simple**: improved from 3.6x to **5.5x** faster (same optimization)
-- **large_nc4_compressed** slice: improved from **0.11x** of georust to **1.07x faster**
-- **large_nc4_compressed** steady-state full read remains the only paired loss at **0.82x**
 
 ## Limits
 
