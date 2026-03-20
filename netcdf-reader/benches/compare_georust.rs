@@ -530,22 +530,18 @@ fn slice_checksum_georust(path: &Path, case: &BenchCase, slice: SliceSpec) -> u6
 fn slice_checksum_georust_file(file: &netcdf::File, case: &BenchCase, slice: SliceSpec) -> u64 {
     let variable = file.variable(case.variable).unwrap();
     match case.kind {
-        NumericKind::F32 => {
-            checksum_f32(
-                variable
-                    .get_values::<f32, _>((slice.start, slice.count))
-                    .unwrap()
-                    .iter(),
-            )
-        }
-        NumericKind::F64 => {
-            checksum_f64(
-                variable
-                    .get_values::<f64, _>((slice.start, slice.count))
-                    .unwrap()
-                    .iter(),
-            )
-        }
+        NumericKind::F32 => checksum_f32(
+            variable
+                .get_values::<f32, _>((slice.start, slice.count))
+                .unwrap()
+                .iter(),
+        ),
+        NumericKind::F64 => checksum_f64(
+            variable
+                .get_values::<f64, _>((slice.start, slice.count))
+                .unwrap()
+                .iter(),
+        ),
     }
 }
 
