@@ -11,6 +11,6 @@ repository = "https://github.com/i-norden/netcdf-rust"
 homepage = "https://github.com/i-norden/netcdf-rust"
 
 [workspace.dependencies]
-ndarray = "0.16"
+ndarray = "0.17"
 thiserror = "2"
 memmap2 = "0.9"
