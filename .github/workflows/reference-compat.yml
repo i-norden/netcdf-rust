@@ -1,4 +1,4 @@
-name: Reference compatibility
+name: Reference Compat
 
 on:
   workflow_dispatch:
