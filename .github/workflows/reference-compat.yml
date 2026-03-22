@@ -1,0 +1,47 @@
+name: Reference compatibility
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  reference-benchmarks:
+    name: Reference compatibility benchmarks
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/reference-compat
+      BENCH_THREAD_LIST: "1,2,4,8"
+      BENCH_HOT_OPS_PER_THREAD: "256"
+      BENCHMARK_SUMMARY_PATH: ${{ github.workspace }}/benchmark-summary.md
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run full reference benchmark suite
+        run: scripts/run-reference-benchmarks.sh
+
+      - name: Upload benchmark summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-summary
+          path: ${{ env.BENCHMARK_SUMMARY_PATH }}
+
+      - name: Upload criterion results
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-results
+          path: ${{ env.CARGO_TARGET_DIR }}/criterion

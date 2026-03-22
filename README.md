@@ -129,12 +129,11 @@ let file = Hdf5File::open_with_options("data.h5", OpenOptions {
 
 ```sh
 # Unit tests (no external dependencies)
-cargo test
+cargo test --workspace
 
 # Integration tests with generated fixtures
-pip install h5py netCDF4 numpy
-python testdata/generate_fixtures.py
-cargo test
+scripts/generate-fixtures.sh
+cargo test --workspace
 ```
 
 ## Releasing
@@ -149,8 +148,11 @@ against the C-backed [`netcdf`](https://github.com/georust/netcdf) crate on the
 checked-in fixtures plus larger generated benchmark fixtures.
 
 ```sh
-# Full benchmark matrix
-cargo bench -p netcdf-reader --bench compare_georust
+# Full benchmark matrix plus Criterion summary
+scripts/run-reference-benchmarks.sh
+
+# PR smoke benchmark gate against a base branch
+BENCH_BASE_REF=origin/main scripts/run-benchmark-smoke.sh
 
 # Summarize the latest Criterion results
 python3 scripts/criterion_summary.py
@@ -168,6 +170,7 @@ Notes:
 - The suite separates open cost, metadata walks, warm full reads, end-to-end reads, slices, and threaded workloads.
 - Larger benchmark fixtures are generated at runtime.
 - In the `netcdf 0.12.0` baseline used for these runs, libnetcdf entry points go through a shared process-global lock. The contention benchmarks are intended to make that visible.
+- The GitHub Actions smoke benchmark is useful for catching obvious regressions, but shared-runner numbers are not authoritative performance claims. Use local runs or the manual `reference-compat` workflow artifacts for real comparisons.
 
 ## Known limitations
 
