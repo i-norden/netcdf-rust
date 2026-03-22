@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
 jobs:
   check:
     name: Check
@@ -21,10 +32,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test
+        run: cargo test --workspace
 
   no-default-features:
     name: Test without default features
@@ -52,14 +63,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Python dependencies
-        run: pip install 'h5py<3.16' netCDF4 numpy
-
       - name: Generate fixtures
-        run: python testdata/generate_fixtures.py
+        run: scripts/generate-fixtures.sh
 
       - name: Test with fixtures
-        run: cargo test
+        run: cargo test --workspace
 
   bench-regression-smoke:
     name: Benchmark regression smoke test
@@ -73,7 +81,8 @@ jobs:
       BENCH_MEASUREMENT_TIME: "0.2"
       BENCH_WARMUP_TIME: "0.2"
       BENCH_REGRESSION_THRESHOLD_PERCENT: "10"
-      BENCH_SMOKE_FILTER: "open_only/(cairn|netcdf_rust)/(cdf1_simple|large_nc4_compressed)|metadata_reuse_handle/(cairn|netcdf_rust)/(cdf1_simple|nc4_compressed)|read_full_reuse_handle/(cairn|netcdf_rust)/(nc4_compressed|large_nc4_compressed)|slice_reuse_handle_hdf5_backend/(cairn|netcdf_rust)/(nc4_compressed|large_nc4_compressed)|parallel_open_and_read/(cairn|netcdf_rust)_x(1|4)/large_nc4_compressed|parallel_metadata_batch/(cairn|netcdf_rust)_x(1|4)/nc4_basic|parallel_slice_batch/(cairn|netcdf_rust)_x(1|4)/nc4_compressed|read_full_internal_parallel/(cairn|netcdf_rust)_x(1|4)/(large_nc4_compressed|nc4_compressed)|read_full_internal_parallel_nocache/(cairn|netcdf_rust)_x(1|4)/large_nc4_compressed"
+      BENCH_SMOKE_FILTER: "open_only/netcdf_rust/(cdf1_simple|large_nc4_compressed)|metadata_reuse_handle/netcdf_rust/(cdf1_simple|nc4_compressed)|read_full_reuse_handle/netcdf_rust/(nc4_compressed|large_nc4_compressed)|slice_reuse_handle_hdf5_backend/netcdf_rust/(nc4_compressed|large_nc4_compressed)|parallel_open_and_read/netcdf_rust_x(1|4)/large_nc4_compressed|parallel_metadata_batch/netcdf_rust_x(1|4)/nc4_basic|parallel_slice_batch/netcdf_rust_x(1|4)/nc4_compressed|read_full_internal_parallel/netcdf_rust_x(1|4)/(large_nc4_compressed|nc4_compressed)|read_full_internal_parallel_nocache/netcdf_rust_x(1|4)/large_nc4_compressed"
+      BENCH_BASE_REF: origin/${{ github.base_ref }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -84,134 +93,5 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev libnetcdf-dev
-
-      - name: Install critcmp
-        run: cargo install critcmp
-
-      - name: Generate fixtures for benchmarks
-        run: |
-          pip install 'h5py<3.16' netCDF4 numpy
-          python testdata/generate_fixtures.py
-
-      - name: Checkout base and run baseline benchmarks
-        run: |
-          git worktree add ../base origin/${{ github.base_ref }}
-          cd ../base
-          python testdata/generate_fixtures.py
-          cargo bench -p netcdf-reader --bench compare_georust \
-            "$BENCH_SMOKE_FILTER" \
-            -- --noplot \
-            --sample-size "$BENCH_SAMPLE_SIZE" \
-            --measurement-time "$BENCH_MEASUREMENT_TIME" \
-            --warm-up-time "$BENCH_WARMUP_TIME" \
-            --save-baseline base
-
-      - name: Run PR benchmarks
-        run: |
-          cargo bench -p netcdf-reader --bench compare_georust \
-            "$BENCH_SMOKE_FILTER" \
-            -- --noplot \
-            --sample-size "$BENCH_SAMPLE_SIZE" \
-            --measurement-time "$BENCH_MEASUREMENT_TIME" \
-            --warm-up-time "$BENCH_WARMUP_TIME" \
-            --save-baseline pr
-
-      - name: Compare (fail on >10% regression)
-        run: |
-          echo "Benchmark deltas >=${BENCH_REGRESSION_THRESHOLD_PERCENT}%:"
-          critcmp base pr --target-dir "$CARGO_TARGET_DIR" --threshold "$BENCH_REGRESSION_THRESHOLD_PERCENT" || true
-
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-          from pathlib import Path
-
-          threshold_percent = float(os.environ["BENCH_REGRESSION_THRESHOLD_PERCENT"])
-          threshold = 1.0 + threshold_percent / 100.0
-          target = Path(os.environ["CARGO_TARGET_DIR"]) / "criterion"
-          base_files = sorted(target.glob("**/base/estimates.json"))
-          pr_files = sorted(target.glob("**/pr/estimates.json"))
-          if not base_files:
-              print(f"No base benchmark estimates found under {target}", file=sys.stderr)
-              sys.exit(1)
-          if not pr_files:
-              print(f"No PR benchmark estimates found under {target}", file=sys.stderr)
-              sys.exit(1)
-
-          def canonical_name(name: str) -> str:
-              return (
-                  name.replace(
-                      "parallel_read_shared_cairn",
-                      "parallel_read_shared_netcdf_rust",
-                  )
-                  .replace("/cairn_x", "/netcdf_rust_x")
-                  .replace("/cairn/", "/netcdf_rust/")
-              )
-
-          pr_index = {
-              canonical_name(pr_file.parent.parent.relative_to(target).as_posix()): pr_file
-              for pr_file in pr_files
-          }
-
-          regressions = []
-          missing_pr = []
-
-          for base_file in base_files:
-              bench_dir = base_file.parent.parent
-              bench_name = bench_dir.relative_to(target).as_posix()
-              canonical_bench_name = canonical_name(bench_name)
-              pr_file = pr_index.get(canonical_bench_name)
-              if pr_file is None:
-                  missing_pr.append(bench_name)
-                  continue
-
-              with base_file.open() as fh:
-                  base_estimates = json.load(fh)
-              with pr_file.open() as fh:
-                  pr_estimates = json.load(fh)
-
-              # Median is more robust than mean for short smoke-style CI runs on
-              # noisy shared runners.
-              base_mean = base_estimates["median"]["point_estimate"]
-              pr_mean = pr_estimates["median"]["point_estimate"]
-
-              if base_mean <= 0 or pr_mean <= 0:
-                  continue
-
-              ratio = pr_mean / base_mean
-              if ratio > threshold:
-                  regressions.append(
-                      (ratio, canonical_bench_name, base_mean, pr_mean)
-                  )
-
-          if missing_pr:
-              print("Missing PR benchmark estimates for:", file=sys.stderr)
-              for name in missing_pr:
-                  print(f"  {name}", file=sys.stderr)
-              sys.exit(1)
-
-          def fmt_ns(value: float) -> str:
-              for unit, scale in (("s", 1e9), ("ms", 1e6), ("us", 1e3)):
-                  if value >= scale:
-                      return f"{value / scale:.1f}{unit}"
-              return f"{value:.1f}ns"
-
-          if regressions:
-              print(
-                  f"Benchmark regressions >{threshold_percent:.0f}% "
-                  "(PR median / base median):",
-                  file=sys.stderr,
-              )
-              for ratio, name, base_mean, pr_mean in sorted(regressions, reverse=True):
-                  print(
-                      f"  {name:70} {ratio:5.2f}x  "
-                      f"base={fmt_ns(base_mean):>8}  pr={fmt_ns(pr_mean):>8}",
-                      file=sys.stderr,
-                  )
-              sys.exit(1)
-
-          print(f"No benchmark regressions >{threshold_percent:.0f}% detected.")
-          PY
+      - name: Run benchmark regression smoke test
+        run: scripts/run-benchmark-smoke.sh

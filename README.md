@@ -129,45 +129,20 @@ let file = Hdf5File::open_with_options("data.h5", OpenOptions {
 
 ```sh
 # Unit tests (no external dependencies)
-cargo test
+cargo test --workspace
 
 # Integration tests with generated fixtures
-pip install h5py netCDF4 numpy
-python testdata/generate_fixtures.py
-cargo test
+scripts/generate-fixtures.sh
+cargo test --workspace
 ```
+
+For reference comparisons and current benchmark results against
+`georust/netcdf`, see [docs/benchmark-report.md](docs/benchmark-report.md).
 
 ## Releasing
 
 See [RELEASING.md](RELEASING.md) for the release checklist and the required
 publish order for `hdf5-reader` and `netcdf-reader`.
-
-## Benchmarks
-
-`netcdf-reader` includes a Criterion benchmark that compares this implementation
-against the C-backed [`netcdf`](https://github.com/georust/netcdf) crate on the
-checked-in fixtures plus larger generated benchmark fixtures.
-
-```sh
-# Full benchmark matrix
-cargo bench -p netcdf-reader --bench compare_georust
-
-# Summarize the latest Criterion results
-python3 scripts/criterion_summary.py
-
-# Include x1-relative speedup for threaded workloads
-python3 scripts/criterion_summary.py --speedup \
-  --group parallel_metadata_batch \
-  --group parallel_slice_batch \
-  --group read_full_internal_parallel \
-  --group parallel_open_and_read
-```
-
-Notes:
-- The benchmark uses `netcdf` with its `static` feature, so it builds a bundled `netcdf-c` stack.
-- The suite separates open cost, metadata walks, warm full reads, end-to-end reads, slices, and threaded workloads.
-- Larger benchmark fixtures are generated at runtime.
-- In the `netcdf 0.12.0` baseline used for these runs, libnetcdf entry points go through a shared process-global lock. The contention benchmarks are intended to make that visible.
 
 ## Known limitations
 
