@@ -6,10 +6,43 @@
 use ndarray::ArrayD;
 
 use crate::error::{Error, Result};
-use crate::types::{NcType, NcVariable};
+use crate::types::{
+    checked_mul_u64, checked_shape_elements, checked_usize_from_u64, NcType, NcVariable,
+};
 
 use super::data::{self, compute_record_stride, NcReadType};
 use super::ClassicFile;
+
+#[derive(Clone, Debug)]
+enum ResolvedClassicSelectionDim {
+    Index(u64),
+    Slice {
+        start: u64,
+        end: u64,
+        step: u64,
+        count: usize,
+        is_full_unit_stride: bool,
+    },
+}
+
+impl ResolvedClassicSelectionDim {
+    fn is_full_unit_stride(&self) -> bool {
+        matches!(
+            self,
+            Self::Slice {
+                is_full_unit_stride: true,
+                ..
+            }
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedClassicSelection {
+    dims: Vec<ResolvedClassicSelectionDim>,
+    result_shape: Vec<usize>,
+    result_elements: usize,
+}
 
 impl ClassicFile {
     /// Read a variable's data as an ndarray of the specified type.
@@ -120,18 +153,14 @@ impl ClassicFile {
 
     /// Read a slice (hyperslab) of a variable.
     ///
-    /// For non-record variables where the selection only restricts the outermost
-    /// dimension (inner dims select full range, step=1), byte offsets are computed
-    /// directly to avoid reading the entire variable. Otherwise falls back to
+    /// Non-record variables are read directly from the on-disk byte ranges for
+    /// arbitrary selections. Record variables still fall back to
     /// full-read-then-slice.
     pub fn read_variable_slice<T: NcReadType>(
         &self,
         name: &str,
         selection: &crate::types::NcSliceInfo,
     ) -> Result<ArrayD<T>> {
-        use crate::types::NcSliceInfoElem;
-        use ndarray::IxDyn;
-
         let var = self.find_variable(name)?;
         let expected = T::nc_type();
         if var.dtype != expected {
@@ -141,151 +170,19 @@ impl ClassicFile {
             });
         }
         let file_data = self.data.as_slice();
+        let resolved = resolve_classic_selection(
+            var,
+            selection,
+            if var.is_record_var { self.numrecs } else { 0 },
+        )?;
 
-        // For non-record variables, try direct byte-offset extraction.
-        if !var.is_record_var && var.ndim() > 0 {
-            let shape: Vec<u64> = var.shape();
-            let ndim = shape.len();
-
-            // Check if inner dims are all full-range with step=1.
-            let can_direct = selection.selections.len() == ndim
-                && selection
-                    .selections
-                    .iter()
-                    .enumerate()
-                    .skip(1)
-                    .all(|(d, sel)| {
-                        matches!(sel, NcSliceInfoElem::Slice { start, end, step }
-                        if *start == 0 && *step == 1 && (*end == u64::MAX || *end >= shape[d]))
-                    });
-
-            if can_direct {
-                let elem_size = T::element_size();
-                let row_elements = crate::types::checked_shape_elements(
-                    &shape[1..],
-                    "classic slice row element count",
-                )?
-                .max(1);
-                let row_bytes = crate::types::checked_usize_from_u64(
-                    crate::types::checked_mul_u64(
-                        row_elements,
-                        elem_size as u64,
-                        "classic slice row size in bytes",
-                    )?,
-                    "classic slice row size in bytes",
-                )?;
-
-                let (first_row, num_rows, result_shape) = match &selection.selections[0] {
-                    NcSliceInfoElem::Index(idx) => {
-                        let rs: Vec<usize> = shape[1..]
-                            .iter()
-                            .map(|&d| {
-                                crate::types::checked_usize_from_u64(
-                                    d,
-                                    "classic slice result dimension",
-                                )
-                            })
-                            .collect::<Result<Vec<_>>>()?;
-                        (*idx, 1u64, rs)
-                    }
-                    NcSliceInfoElem::Slice { start, end, step } => {
-                        let actual_end = if *end == u64::MAX {
-                            shape[0]
-                        } else {
-                            (*end).min(shape[0])
-                        };
-                        let count = (actual_end - start).div_ceil(*step);
-                        if *step == 1 {
-                            let mut rs = vec![crate::types::checked_usize_from_u64(
-                                count,
-                                "classic slice result dimension",
-                            )?];
-                            rs.extend(
-                                shape[1..]
-                                    .iter()
-                                    .map(|&d| {
-                                        crate::types::checked_usize_from_u64(
-                                            d,
-                                            "classic slice result dimension",
-                                        )
-                                    })
-                                    .collect::<Result<Vec<_>>>()?,
-                            );
-                            (*start, count, rs)
-                        } else {
-                            // Step > 1: can't do contiguous read, fall through.
-                            return {
-                                let full = data::read_non_record_variable(file_data, var)?;
-                                slice_classic_array(&full, var, selection, 0)
-                            };
-                        }
-                    }
-                };
-
-                let byte_offset = crate::types::checked_usize_from_u64(
-                    var.data_offset,
-                    "classic slice data offset",
-                )?
-                .checked_add(
-                    crate::types::checked_usize_from_u64(first_row, "classic slice row offset")?
-                        .checked_mul(row_bytes)
-                        .ok_or_else(|| {
-                            Error::InvalidData(
-                                "classic slice byte offset exceeds platform usize".to_string(),
-                            )
-                        })?,
-                )
-                .ok_or_else(|| {
-                    Error::InvalidData(
-                        "classic slice byte offset exceeds platform usize".to_string(),
-                    )
-                })?;
-                let total_bytes =
-                    crate::types::checked_usize_from_u64(num_rows, "classic slice row count")?
-                        .checked_mul(row_bytes)
-                        .ok_or_else(|| {
-                            Error::InvalidData(
-                                "classic slice byte count exceeds platform usize".to_string(),
-                            )
-                        })?;
-                let total_elements = crate::types::checked_usize_from_u64(
-                    crate::types::checked_mul_u64(
-                        num_rows,
-                        row_elements,
-                        "classic slice element count",
-                    )?,
-                    "classic slice element count",
-                )?;
-
-                let end = byte_offset.checked_add(total_bytes).ok_or_else(|| {
-                    Error::InvalidData(
-                        "classic slice byte range exceeds platform usize".to_string(),
-                    )
-                })?;
-                if end > file_data.len() {
-                    return Err(Error::InvalidData(format!(
-                        "variable '{}' slice data extends beyond file",
-                        var.name
-                    )));
-                }
-
-                let data_slice = &file_data[byte_offset..end];
-                let values = T::decode_bulk_be(data_slice, total_elements)?;
-
-                return ndarray::ArrayD::from_shape_vec(IxDyn(&result_shape), values)
-                    .map_err(|e| Error::InvalidData(format!("failed to create array: {}", e)));
-            }
+        if !var.is_record_var {
+            return read_non_record_variable_slice_direct(file_data, var, &resolved);
         }
 
-        // Fallback: read full variable then slice.
-        if var.is_record_var {
-            let record_stride = compute_record_stride(&self.root_group.variables);
-            let full = data::read_record_variable(file_data, var, self.numrecs, record_stride)?;
-            slice_classic_array(&full, var, selection, self.numrecs)
-        } else {
-            let full = data::read_non_record_variable(file_data, var)?;
-            slice_classic_array(&full, var, selection, 0)
-        }
+        let record_stride = compute_record_stride(&self.root_group.variables);
+        let full = data::read_record_variable(file_data, var, self.numrecs, record_stride)?;
+        slice_classic_array(&full, &resolved)
     }
 
     /// Read a slice with automatic type promotion to f64.
@@ -295,18 +192,11 @@ impl ClassicFile {
         selection: &crate::types::NcSliceInfo,
     ) -> Result<ArrayD<f64>> {
         let var = self.find_variable(name)?;
-        let file_data = self.data.as_slice();
 
         macro_rules! slice_promoted {
             ($ty:ty) => {{
-                let full = self.read_typed_variable::<$ty>(var, file_data)?;
-                let full_f64 = full.mapv(|v| v as f64);
-                slice_classic_array(
-                    &full_f64,
-                    var,
-                    selection,
-                    if var.is_record_var { self.numrecs } else { 0 },
-                )
+                let sliced = self.read_variable_slice::<$ty>(name, selection)?;
+                Ok(sliced.mapv(|v| v as f64))
             }};
         }
 
@@ -356,62 +246,304 @@ impl ClassicFile {
     }
 }
 
+fn variable_shape_for_selection(var: &NcVariable, numrecs: u64) -> Vec<u64> {
+    let mut shape = var.shape();
+    if var.is_record_var && !shape.is_empty() {
+        shape[0] = numrecs;
+    }
+    shape
+}
+
+fn row_major_strides(shape: &[u64], context: &str) -> Result<Vec<u64>> {
+    let ndim = shape.len();
+    if ndim == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut strides = vec![1u64; ndim];
+    for i in (0..ndim - 1).rev() {
+        strides[i] = checked_mul_u64(strides[i + 1], shape[i + 1], context)?;
+    }
+    Ok(strides)
+}
+
+fn resolve_classic_selection(
+    var: &NcVariable,
+    selection: &crate::types::NcSliceInfo,
+    numrecs: u64,
+) -> Result<ResolvedClassicSelection> {
+    use crate::types::NcSliceInfoElem;
+
+    let shape = variable_shape_for_selection(var, numrecs);
+    if selection.selections.len() != shape.len() {
+        return Err(Error::InvalidData(format!(
+            "selection has {} dimensions but variable '{}' has {}",
+            selection.selections.len(),
+            var.name,
+            shape.len()
+        )));
+    }
+
+    let mut dims = Vec::with_capacity(shape.len());
+    let mut result_shape = Vec::new();
+    let mut result_elements = 1usize;
+
+    for (dim, (sel, &dim_size)) in selection.selections.iter().zip(shape.iter()).enumerate() {
+        match sel {
+            NcSliceInfoElem::Index(idx) => {
+                if *idx >= dim_size {
+                    return Err(Error::InvalidData(format!(
+                        "index {} out of bounds for dimension {} (size {})",
+                        idx, dim, dim_size
+                    )));
+                }
+                dims.push(ResolvedClassicSelectionDim::Index(*idx));
+            }
+            NcSliceInfoElem::Slice { start, end, step } => {
+                if *step == 0 {
+                    return Err(Error::InvalidData("slice step cannot be 0".to_string()));
+                }
+                if *start > dim_size {
+                    return Err(Error::InvalidData(format!(
+                        "slice start {} out of bounds for dimension {} (size {})",
+                        start, dim, dim_size
+                    )));
+                }
+
+                let actual_end = if *end == u64::MAX {
+                    dim_size
+                } else {
+                    (*end).min(dim_size)
+                };
+                let count_u64 = if *start >= actual_end {
+                    0
+                } else {
+                    (actual_end - *start).div_ceil(*step)
+                };
+                let count = checked_usize_from_u64(count_u64, "classic slice result dimension")?;
+
+                result_shape.push(count);
+                result_elements = result_elements.checked_mul(count).ok_or_else(|| {
+                    Error::InvalidData(
+                        "classic slice result element count exceeds platform usize".to_string(),
+                    )
+                })?;
+                dims.push(ResolvedClassicSelectionDim::Slice {
+                    start: *start,
+                    end: actual_end,
+                    step: *step,
+                    count,
+                    is_full_unit_stride: *start == 0 && actual_end == dim_size && *step == 1,
+                });
+            }
+        }
+    }
+
+    Ok(ResolvedClassicSelection {
+        dims,
+        result_shape,
+        result_elements,
+    })
+}
+
+fn read_non_record_variable_slice_direct<T: NcReadType>(
+    file_data: &[u8],
+    var: &NcVariable,
+    resolved: &ResolvedClassicSelection,
+) -> Result<ArrayD<T>> {
+    use ndarray::IxDyn;
+
+    if resolved.result_elements == 0 {
+        return ArrayD::from_shape_vec(IxDyn(&resolved.result_shape), Vec::new())
+            .map_err(|e| Error::InvalidData(format!("failed to create array: {e}")));
+    }
+
+    let shape = variable_shape_for_selection(var, 0);
+    let strides = row_major_strides(&shape, "classic slice stride")?;
+    let tail_start = resolved
+        .dims
+        .iter()
+        .rposition(|dim| !dim.is_full_unit_stride())
+        .map_or(0, |idx| idx + 1);
+    let block_elements_u64 = checked_shape_elements(
+        &shape[tail_start..],
+        "classic slice contiguous block element count",
+    )?;
+    let block_elements = checked_usize_from_u64(
+        block_elements_u64,
+        "classic slice contiguous block element count",
+    )?;
+    let elem_size = T::element_size();
+    let block_bytes = checked_usize_from_u64(
+        checked_mul_u64(
+            block_elements_u64,
+            elem_size as u64,
+            "classic slice contiguous block size in bytes",
+        )?,
+        "classic slice contiguous block size in bytes",
+    )?;
+    let base_offset = checked_usize_from_u64(var.data_offset, "classic slice data offset")?;
+
+    let mut values = Vec::with_capacity(resolved.result_elements);
+    read_selected_blocks_recursive::<T>(
+        0,
+        tail_start,
+        0,
+        &resolved.dims,
+        &strides,
+        file_data,
+        &var.name,
+        base_offset,
+        block_elements,
+        block_bytes,
+        &mut values,
+    )?;
+
+    debug_assert_eq!(values.len(), resolved.result_elements);
+    ArrayD::from_shape_vec(IxDyn(&resolved.result_shape), values)
+        .map_err(|e| Error::InvalidData(format!("failed to create array: {e}")))
+}
+
+fn read_selected_blocks_recursive<T: NcReadType>(
+    level: usize,
+    tail_start: usize,
+    current_offset: u64,
+    dims: &[ResolvedClassicSelectionDim],
+    strides: &[u64],
+    file_data: &[u8],
+    var_name: &str,
+    base_offset: usize,
+    block_elements: usize,
+    block_bytes: usize,
+    values: &mut Vec<T>,
+) -> Result<()> {
+    if level == tail_start {
+        let byte_offset = checked_usize_from_u64(
+            checked_mul_u64(
+                current_offset,
+                T::element_size() as u64,
+                "classic slice element byte offset",
+            )?,
+            "classic slice element byte offset",
+        )?;
+        let start = base_offset.checked_add(byte_offset).ok_or_else(|| {
+            Error::InvalidData("classic slice byte offset exceeds platform usize".to_string())
+        })?;
+        let end = start.checked_add(block_bytes).ok_or_else(|| {
+            Error::InvalidData("classic slice byte range exceeds platform usize".to_string())
+        })?;
+        if end > file_data.len() {
+            return Err(Error::InvalidData(format!(
+                "variable '{}' slice data extends beyond file",
+                var_name
+            )));
+        }
+
+        let mut decoded = T::decode_bulk_be(&file_data[start..end], block_elements)?;
+        values.append(&mut decoded);
+        return Ok(());
+    }
+
+    match &dims[level] {
+        ResolvedClassicSelectionDim::Index(idx) => read_selected_blocks_recursive::<T>(
+            level + 1,
+            tail_start,
+            current_offset
+                .checked_add(checked_mul_u64(
+                    *idx,
+                    strides[level],
+                    "classic slice logical element offset",
+                )?)
+                .ok_or_else(|| {
+                    Error::InvalidData(
+                        "classic slice logical element offset exceeds u64".to_string(),
+                    )
+                })?,
+            dims,
+            strides,
+            file_data,
+            var_name,
+            base_offset,
+            block_elements,
+            block_bytes,
+            values,
+        ),
+        ResolvedClassicSelectionDim::Slice {
+            start, step, count, ..
+        } => {
+            let start = *start;
+            let step = *step;
+            let count = *count;
+            for ordinal in 0..count {
+                let coord = start
+                    .checked_add(checked_mul_u64(
+                        ordinal as u64,
+                        step,
+                        "classic slice coordinate",
+                    )?)
+                    .ok_or_else(|| {
+                        Error::InvalidData("classic slice coordinate exceeds u64".to_string())
+                    })?;
+                read_selected_blocks_recursive::<T>(
+                    level + 1,
+                    tail_start,
+                    current_offset
+                        .checked_add(checked_mul_u64(
+                            coord,
+                            strides[level],
+                            "classic slice logical element offset",
+                        )?)
+                        .ok_or_else(|| {
+                            Error::InvalidData(
+                                "classic slice logical element offset exceeds u64".to_string(),
+                            )
+                        })?,
+                    dims,
+                    strides,
+                    file_data,
+                    var_name,
+                    base_offset,
+                    block_elements,
+                    block_bytes,
+                    values,
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Apply a NcSliceInfo selection to an already-read classic array.
 ///
 /// For classic format, we read the full variable first then extract the
 /// hyperslab, since the data is contiguous (non-record) or interleaved (record).
 fn slice_classic_array<T: Clone + Default + 'static>(
     full: &ArrayD<T>,
-    var: &NcVariable,
-    selection: &crate::types::NcSliceInfo,
-    numrecs: u64,
+    resolved: &ResolvedClassicSelection,
 ) -> Result<ArrayD<T>> {
-    use crate::types::NcSliceInfoElem;
-    use ndarray::Slice;
+    use ndarray::{IxDyn, Slice};
 
-    let ndim = var.ndim();
-    if selection.selections.len() != ndim {
-        return Err(Error::InvalidData(format!(
-            "selection has {} dimensions but variable '{}' has {}",
-            selection.selections.len(),
-            var.name,
-            ndim
-        )));
-    }
-
-    // Build the shape of the full array, resolving unlimited dims.
-    let mut shape: Vec<usize> = var.shape().iter().map(|&s| s as usize).collect();
-    if var.is_record_var && !shape.is_empty() {
-        shape[0] = numrecs as usize;
+    if resolved.result_elements == 0 {
+        return ArrayD::from_shape_vec(IxDyn(&resolved.result_shape), Vec::new())
+            .map_err(|e| Error::InvalidData(format!("failed to create array: {e}")));
     }
 
     // First, apply range slicing on all dimensions.
     let mut view = full.view();
-    for (d, sel) in selection.selections.iter().enumerate() {
-        let dim_size = shape[d] as u64;
-        match sel {
-            NcSliceInfoElem::Index(idx) => {
-                if *idx >= dim_size {
-                    return Err(Error::InvalidData(format!(
-                        "index {} out of bounds for dimension {} (size {})",
-                        idx, d, dim_size
-                    )));
-                }
-                // Slice to a single element (will collapse later).
+    for (d, dim) in resolved.dims.iter().enumerate() {
+        match dim {
+            ResolvedClassicSelectionDim::Index(idx) => {
                 view.slice_axis_inplace(
                     ndarray::Axis(d),
                     Slice::new(*idx as isize, Some(*idx as isize + 1), 1),
                 );
             }
-            NcSliceInfoElem::Slice { start, end, step } => {
-                let actual_end = if *end == u64::MAX {
-                    dim_size as isize
-                } else {
-                    (*end).min(dim_size) as isize
-                };
+            ResolvedClassicSelectionDim::Slice {
+                start, end, step, ..
+            } => {
                 view.slice_axis_inplace(
                     ndarray::Axis(d),
-                    Slice::new(*start as isize, Some(actual_end), *step as isize),
+                    Slice::new(*start as isize, Some(*end as isize), *step as isize),
                 );
             }
         }
@@ -420,8 +552,8 @@ fn slice_classic_array<T: Clone + Default + 'static>(
     // Now collapse Index dimensions (remove axes of size 1 from Index selections).
     let mut result = view.to_owned();
     let mut removed = 0;
-    for (d, sel) in selection.selections.iter().enumerate() {
-        if matches!(sel, NcSliceInfoElem::Index(_)) {
+    for (d, dim) in resolved.dims.iter().enumerate() {
+        if matches!(dim, ResolvedClassicSelectionDim::Index(_)) {
             let axis = d - removed;
             result = result.index_axis_move(ndarray::Axis(axis), 0);
             removed += 1;

@@ -150,7 +150,7 @@ publish order for `hdf5-reader` and `netcdf-reader`.
 - SZIP, N-Bit, and ScaleOffset filters are not built in (register via `FilterRegistry`)
 - SOHM (shared object header message table) resolution returns a descriptive error
 - Fractal heap huge/tiny objects are not yet supported (managed objects work)
-- Classic format slice reads fall back to full-read-then-slice when the selection has a stride >1 or restricts inner dimensions
+- Classic record-variable slice reads still fall back to full-read-then-slice for strided or inner-dimension-restricted selections
 - CF time decoding uses Gregorian approximation for non-standard calendars (noleap, 360_day)
 
 ## License
