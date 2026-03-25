@@ -50,6 +50,7 @@ enum FixtureSource {
 #[derive(Clone, Copy)]
 enum GeneratedFixtureKind {
     LargeCdf5,
+    LargeRecordCdf5,
     LargeNc4Compressed,
     NestedNc4Groups,
 }
@@ -71,6 +72,7 @@ const SHAPE_NC4_COMPRESSED: &[usize] = &[100, 100];
 const SHAPE_NC4_GROUPS_TEMPERATURE: &[usize] = &[3];
 const SHAPE_NESTED_NC4_PRESSURE: &[usize] = &[3];
 const SHAPE_LARGE_CDF5: &[usize] = &[2048, 1024];
+const SHAPE_LARGE_RECORD_CDF5: &[usize] = &[1024, 1024];
 const SHAPE_LARGE_NC4_COMPRESSED: &[usize] = &[2048, 1024];
 
 const UNIT_STRIDE_2D: &[usize] = &[1, 1];
@@ -109,6 +111,11 @@ const SLICE_LARGE_CDF5_STRIDED: SliceSpec = SliceSpec {
     start: &[256, 0],
     count: &[384, 1024],
     stride: &[3, 1],
+};
+const SLICE_LARGE_RECORD_CDF5_STRIDED: SliceSpec = SliceSpec {
+    start: &[32, 16],
+    count: &[160, 224],
+    stride: &[3, 4],
 };
 
 const CASES: &[BenchCase] = &[
@@ -179,6 +186,15 @@ const CASES: &[BenchCase] = &[
         is_netcdf4: false,
     },
     BenchCase {
+        id: "large_record_cdf5",
+        fixture: FixtureSource::Generated(GeneratedFixtureKind::LargeRecordCdf5),
+        variable: "series",
+        kind: NumericKind::F32,
+        shape: SHAPE_LARGE_RECORD_CDF5,
+        slice: Some(SLICE_LARGE_RECORD_CDF5_STRIDED),
+        is_netcdf4: false,
+    },
+    BenchCase {
         id: "large_nc4_compressed",
         fixture: FixtureSource::Generated(GeneratedFixtureKind::LargeNc4Compressed),
         variable: "compressed",
@@ -192,6 +208,7 @@ const CASES: &[BenchCase] = &[
 struct GeneratedFixtures {
     _temp_dir: TempDir,
     large_cdf5: PathBuf,
+    large_record_cdf5: PathBuf,
     large_nc4_compressed: PathBuf,
     nested_nc4_groups: PathBuf,
     sparse_huge_logical_nc4: PathBuf,
@@ -213,11 +230,13 @@ fn generated_fixtures() -> &'static GeneratedFixtures {
     GENERATED_FIXTURES.get_or_init(|| {
         let temp_dir = tempfile::tempdir().unwrap();
         let large_cdf5 = temp_dir.path().join("bench_large_cdf5.nc");
+        let large_record_cdf5 = temp_dir.path().join("bench_large_record_cdf5.nc");
         let large_nc4_compressed = temp_dir.path().join("bench_large_nc4_compressed.nc");
         let nested_nc4_groups = temp_dir.path().join("bench_nested_nc4_groups.nc");
         let sparse_huge_logical_nc4 = temp_dir.path().join("bench_sparse_huge_logical_nc4.nc");
 
         create_large_cdf5_fixture(&large_cdf5);
+        create_large_record_cdf5_fixture(&large_record_cdf5);
         create_large_nc4_compressed_fixture(&large_nc4_compressed);
         create_nested_nc4_groups_fixture(&nested_nc4_groups);
         create_sparse_huge_logical_nc4_fixture(&sparse_huge_logical_nc4);
@@ -225,6 +244,7 @@ fn generated_fixtures() -> &'static GeneratedFixtures {
         GeneratedFixtures {
             _temp_dir: temp_dir,
             large_cdf5,
+            large_record_cdf5,
             large_nc4_compressed,
             nested_nc4_groups,
             sparse_huge_logical_nc4,
@@ -246,6 +266,28 @@ fn create_large_cdf5_fixture(path: &Path) {
             })
             .collect();
         variable.put_values(&values, (row, ..)).unwrap();
+    }
+}
+
+fn create_large_record_cdf5_fixture(path: &Path) {
+    let mut file = netcdf::create_with(path, netcdf::Options::_64BIT_DATA).unwrap();
+    file.add_unlimited_dimension("time").unwrap();
+    file.add_dimension("col", SHAPE_LARGE_RECORD_CDF5[1])
+        .unwrap();
+    file.add_variable::<f32>("series", &["time", "col"])
+        .unwrap();
+    file.enddef().unwrap();
+
+    let mut variable = file.variable_mut("series").unwrap();
+    for record in 0..SHAPE_LARGE_RECORD_CDF5[0] {
+        let values: Vec<f32> = (0..SHAPE_LARGE_RECORD_CDF5[1])
+            .map(|col| {
+                let coarse = ((record * 13 + col * 7) % 2048) as f32 * 0.125;
+                let fine = ((record + col * 3) % 17) as f32 * 0.03125;
+                coarse + fine
+            })
+            .collect();
+        variable.put_values(&values, (record, ..)).unwrap();
     }
 }
 
@@ -335,6 +377,9 @@ fn case_path(case: &BenchCase) -> PathBuf {
         }
         FixtureSource::Generated(GeneratedFixtureKind::LargeCdf5) => {
             generated_fixtures().large_cdf5.clone()
+        }
+        FixtureSource::Generated(GeneratedFixtureKind::LargeRecordCdf5) => {
+            generated_fixtures().large_record_cdf5.clone()
         }
         FixtureSource::Generated(GeneratedFixtureKind::LargeNc4Compressed) => {
             generated_fixtures().large_nc4_compressed.clone()
