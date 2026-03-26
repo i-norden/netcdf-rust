@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.4 - 2026-03-25
+
 - Added `Hdf5File::{from_bytes_with_options, from_vec_with_options}` and `NcFile::from_bytes_with_options` so custom cache and filter settings also work for in-memory reads.
 - Added string dataset/variable APIs:
   `hdf5_reader::Dataset::{read_string, read_strings}` and
