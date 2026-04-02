@@ -644,7 +644,7 @@ mod tests {
             ORDER_BE => {
                 let begin = (dtype_len - minbits) / 8;
                 for value in elements {
-                    for k in begin..size {
+                    for (k, byte) in value.iter().enumerate().take(size).skip(begin) {
                         let bit_count = if k == begin {
                             let remainder = (dtype_len - minbits) % 8;
                             if remainder == 0 {
@@ -655,7 +655,7 @@ mod tests {
                         } else {
                             8
                         };
-                        writer.write_bits(value[k] & low_mask(bit_count), bit_count);
+                        writer.write_bits(*byte & low_mask(bit_count), bit_count);
                     }
                 }
             }
@@ -762,7 +762,7 @@ mod tests {
 
     #[test]
     fn full_precision_integer_payload_skips_postprocess() {
-        let raw_values = vec![300u16.to_ne_bytes(), 511u16.to_ne_bytes()];
+        let raw_values = [300u16.to_ne_bytes(), 511u16.to_ne_bytes()];
         let payload: Vec<u8> = raw_values.iter().flat_map(|v| v.iter().copied()).collect();
         let input = header_with_minval(16, 700, &payload);
         let client_data = vec![

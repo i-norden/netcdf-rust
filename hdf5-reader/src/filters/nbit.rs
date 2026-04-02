@@ -434,7 +434,7 @@ mod tests {
                 } else {
                     (datatype_len - desc.offset) / 8 - 1
                 };
-                for k in begin..=end {
+                for (k, byte) in bytes.iter().enumerate().take(end + 1).skip(begin) {
                     let (bit_count, bit_offset) = if begin != end {
                         if k == begin {
                             let remainder = (datatype_len - desc.precision - desc.offset) % 8;
@@ -452,7 +452,7 @@ mod tests {
                     } else {
                         (desc.precision, desc.offset % 8)
                     };
-                    writer.write_bits((bytes[k] >> bit_offset) & low_mask(bit_count), bit_count);
+                    writer.write_bits((*byte >> bit_offset) & low_mask(bit_count), bit_count);
                 }
             }
             _ => panic!("unexpected order"),
